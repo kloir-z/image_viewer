@@ -47,4 +47,3 @@ This is a PyQt based application that provides an interactive image viewer. You 
 - History: The application keeps a history of the directories accessed, which can be re-opened quickly via context menu.
 - Image rotation: Images are automatically rotated according to their EXIF Orientation metadata.
 - Open in explorer: Open the current directory in your system's file explorer from the context menu.
-Please replace yourusername and yourrepository with your actual GitHub username and repository name. Also, ensure to have a requirements.txt file in your repository listing the necessary Python packages for this application.
