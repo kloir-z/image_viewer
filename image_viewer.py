@@ -142,7 +142,6 @@ class ImageViewer(QWidget):
         dropped_file_path = None
         for url in event.mimeData().urls():
             path = url.toLocalFile()
-            print(f"Processing {path}")
             if os.path.isdir(path):
                 dir_path = path
             else:
