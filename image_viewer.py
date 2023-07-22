@@ -199,7 +199,7 @@ class ImageViewer(QWidget):
         
         if self.images:
             current_dir = os.path.dirname(self.images[self.index])
-            open_in_explorer_action = QAction(f"Open {current_dir} in explorer", self)
+            open_in_explorer_action = QAction(f"Open current dir in explorer.", self)
             open_in_explorer_action.triggered.connect(lambda: self.open_in_explorer(current_dir))
             context_menu.addAction(open_in_explorer_action)
 
