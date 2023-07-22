@@ -35,7 +35,7 @@ This is a PyQt based application that provides an interactive image viewer. You 
 1. Run the application:
 
     ```bash
-    python main.py
+    python image_viewerpy
     ```
 
 2. Drag and drop image files or directories onto the application window to view them.
