@@ -5,7 +5,7 @@ from datetime import datetime
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QSizePolicy ,QMenu, QAction
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt
-from PIL import Image
+from PIL import Image, ImageFile
 from collections import OrderedDict
 import subprocess
 
@@ -91,6 +91,7 @@ class ImageViewer(QWidget):
             self.show_next_image()
  
     def update_image(self):
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
         self.is_loading = True
         image_path = self.images[self.index]
         with open(image_path, 'rb') as f:
@@ -199,7 +200,7 @@ class ImageViewer(QWidget):
         
         if self.images:
             current_dir = os.path.dirname(self.images[self.index])
-            open_in_explorer_action = QAction(f"Open current dir in explorer.", self)
+            open_in_explorer_action = QAction(f"###Open current dir in explorer###", self)
             open_in_explorer_action.triggered.connect(lambda: self.open_in_explorer(current_dir))
             context_menu.addAction(open_in_explorer_action)
 
