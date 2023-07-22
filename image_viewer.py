@@ -93,7 +93,6 @@ class ImageViewer(QWidget):
             except AttributeError:
                 exif = None
             if exif is not None:
-                print(f"EXIF info: {exif}")
                 orientation = exif.get(0x0112)
                 if orientation == 2:
                     image = image.transpose(Image.FLIP_LEFT_RIGHT)
