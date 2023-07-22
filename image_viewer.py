@@ -7,6 +7,7 @@ from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt
 from PIL import Image
 from collections import OrderedDict
+import subprocess
 
 class ResizableLabel(QLabel):
     def __init__(self, *args, **kwargs):
@@ -195,8 +196,22 @@ class ImageViewer(QWidget):
                 action = QAction(dir_path, self)
                 action.triggered.connect(lambda _, d=dir_path: self.load_images_from_dir(d))
                 context_menu.addAction(action)
+        
+        if self.images:
+            current_dir = os.path.dirname(self.images[self.index])
+            open_in_explorer_action = QAction(f"Open {current_dir} in explorer", self)
+            open_in_explorer_action.triggered.connect(lambda: self.open_in_explorer(current_dir))
+            context_menu.addAction(open_in_explorer_action)
 
         context_menu.exec_(self.mapToGlobal(position))
+
+    def open_in_explorer(self, path):
+        if sys.platform == "win32":
+            subprocess.Popen(['explorer', os.path.normpath(path)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(['open', os.path.normpath(path)])
+        else:
+            subprocess.Popen(['xdg-open', os.path.normpath(path)])
 
     def load_images_from_dir(self, dir_path):
         self.images = []
