@@ -48,14 +48,13 @@ class ImageViewer(QWidget):
 
         self.setAcceptDrops(True)
 
-        screen_size = QApplication.instance().desktop().screenGeometry()
-        self.setMaximumSize(screen_size.width(), screen_size.height())
-
         self.resize(*size)
         self.move(*position)
 
         self.original_pixmap = None
         self.is_loading = False
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
 
     def mousePressEvent(self, event):
         x = event.x()
