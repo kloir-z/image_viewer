@@ -1,32 +1,50 @@
-# PyQt ImageViewer
+# PyQt Image Viewer
 
-PyQt ImageViewer is a simple image viewer application using PyQt. It supports image drag and drop and analyzes EXIF information to adjust image orientation.
-
-## Features
-
-- Load image files via drag and drop.
-- Automatically adjusts image orientation based on EXIF metadata.
-- Navigate through images via mouse click or keyboard arrow keys.
-- Fullscreen mode support.
-- Handles a variety of image formats (jpg, png, xpm).
-
-## Usage
-
-1. Launch the program.
-2. Drag and drop an image file or a directory containing image files onto the program window.
-3. Toggle fullscreen display by pressing the 'F' key. Return to normal display by pressing the 'Esc' key while in fullscreen mode.
+This is a PyQt based application that provides an interactive image viewer. You can navigate through images, show them in full screen mode, and access them via context menu. The application keeps a history of the directories accessed and allows you to re-open those directories quickly. It also supports drag and drop feature for image files and directories.
 
 ## Requirements
 
-The following Python libraries are required:
-
+- Python 3
 - PyQt5
 - Pillow
 
-You can install these using pip:
+## Installation
 
-```bash
-pip install PyQt5 pillow
-```
-## 
-The code was created using GPT-4.
+1. Clone the repository:
+
+    ```bash
+    git clone https://github.com/kloir-z/image_viewer.git
+    ```
+
+2. Navigate into the cloned repository:
+
+    ```bash
+    cd image_viewer
+    ```
+
+3. Install the required Python packages:
+
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+**Note**: This command should be run in a virtual environment to avoid package conflicts.
+
+## Usage
+
+1. Run the application:
+
+    ```bash
+    python main.py
+    ```
+
+2. Drag and drop image files or directories onto the application window to view them.
+
+## Features
+
+- Image navigation: Navigate through images using left and right arrow keys or by clicking on the left and right sections of the window.
+- Full screen mode: Press 'F' to enter and 'Escape' to exit the full screen mode.
+- History: The application keeps a history of the directories accessed, which can be re-opened quickly via context menu.
+- Image rotation: Images are automatically rotated according to their EXIF Orientation metadata.
+- Open in explorer: Open the current directory in your system's file explorer from the context menu.
+Please replace yourusername and yourrepository with your actual GitHub username and repository name. Also, ensure to have a requirements.txt file in your repository listing the necessary Python packages for this application.
