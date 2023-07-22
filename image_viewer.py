@@ -144,12 +144,12 @@ class ImageViewer(QWidget):
             if os.path.isdir(path):
                 dir_path = path
             else:
-                if path.lower().endswith(('.png', '.xpm', '.jpg')):  # Modify here
+                if path.lower().endswith(('.png', '.xpm', '.gif', '.bmp', '.jpg')):
                     dropped_file_path = os.path.normpath(path)
                 dir_path = os.path.dirname(path)
             files = sorted(os.listdir(dir_path))
             for file in files:
-                if file.lower().endswith(('.png', '.xpm', '.jpg')):  # And here
+                if file.lower().endswith(('.png', '.xpm', '.gif', '.bmp', '.jpg')):
                     self.images.append(os.path.normpath(os.path.join(dir_path, file)))
         if dropped_file_path:
             self.index = self.images.index(dropped_file_path)
