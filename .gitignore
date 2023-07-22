@@ -2,3 +2,4 @@ build
 dist
 venv
 image_viewer.spec
+config.json
