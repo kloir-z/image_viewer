@@ -1,16 +1,32 @@
 # PyQt ImageViewer
-- PyQtを使用した簡易的な画像ビューアプログラムです。画像のドラッグ＆ドロップに対応し、EXIF情報を解析して画像の向きを調整します。
 
-### 使い方
-- プログラムを起動します。
-- 画像ファイル、または含まれている画像ファイルのあるディレクトリをプログラムにドラッグ＆ドロップします。
-- 画像を左クリックまたはキーボードの左キーで前の画像を表示し、右クリックまたはキーボードの右キーで次の画像を表示します。
-- フルスクリーン表示を切り替えるにはFキーを、通常表示に戻すにはEscキーを押します。
+PyQt ImageViewer is a simple image viewer application using PyQt. It supports image drag and drop and analyzes EXIF information to adjust image orientation.
 
-### 必要なライブラリ
+## Features
+
+- Load image files via drag and drop.
+- Automatically adjusts image orientation based on EXIF metadata.
+- Navigate through images via mouse click or keyboard arrow keys.
+- Fullscreen mode support.
+- Handles a variety of image formats (jpg, png, xpm).
+
+## Usage
+
+1. Launch the program.
+2. Drag and drop an image file or a directory containing image files onto the program window.
+3. Toggle fullscreen display by pressing the 'F' key. Return to normal display by pressing the 'Esc' key while in fullscreen mode.
+
+## Requirements
+
+The following Python libraries are required:
+
 - PyQt5
 - Pillow
 
-### ライセンス
-- MIT
+You can install these using pip:
 
+```bash
+pip install PyQt5 pillow
+```
+## 
+The code was created using GPT-4.
