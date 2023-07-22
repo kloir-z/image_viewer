@@ -27,7 +27,7 @@ class ImageViewer(QWidget):
         if os.path.exists(self.config_path):
             with open(self.config_path, 'r') as f:
                 config = json.load(f)
-            history = list(config.get('history', {}).keys())
+            history = list(config.get('history', {}).keys())[::-1] 
             position = config.get('position', [0, 0])
             size = config.get('size', [800, 800])
         else:
@@ -35,8 +35,7 @@ class ImageViewer(QWidget):
             position = [0, 0]
             size = [800, 800]
 
-        self.history = [x for n, x in enumerate(history[::-1]) if x not in history[::-1][n+1:]]
-        self.history = OrderedDict.fromkeys(self.history)
+        self.history = OrderedDict.fromkeys(history)
 
         self.layout = QVBoxLayout()
         self.setLayout(self.layout)
@@ -183,16 +182,16 @@ class ImageViewer(QWidget):
             self.index = 0
 
         if self.images:
-            self.history[dir_path] = None
-            self.history = OrderedDict(list(self.history.items())[-20:])
-
+            if dir_path in self.history:
+                del self.history[dir_path]
+            self.history = OrderedDict([(dir_path, None)] + list(self.history.items())[-19:])
             self.update_image()
             self.label.setPixmap(self.get_scaled_pixmap())
 
     def show_context_menu(self, position):
         context_menu = QMenu(self)
 
-        for dir_path in list(self.history.keys())[::-1]:
+        for dir_path in list(self.history.keys()):
             if os.path.exists(dir_path):
                 action = QAction(dir_path, self)
                 action.triggered.connect(lambda _, d=dir_path: self.load_images_from_dir(d))
@@ -222,6 +221,9 @@ class ImageViewer(QWidget):
                 self.images.append(os.path.normpath(os.path.join(dir_path, file)))
 
         if self.images:
+            if dir_path in self.history:
+                del self.history[dir_path]
+            self.history = OrderedDict([(dir_path, None)] + list(self.history.items())[-19:])
             self.index = 0
             self.update_image()
             self.label.setPixmap(self.get_scaled_pixmap())
