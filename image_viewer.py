@@ -59,24 +59,9 @@ class ImageViewer(QWidget):
     def mousePressEvent(self, event):
         x = event.x()
         if x < self.width() * 0.25:
-            self.show_prev_image()
+            self.move_index(-1)
         elif x > self.width() * 0.75:
-            self.show_next_image()
-
-    def show_next_image(self):
-        self.move_index(1)
-
-    def show_prev_image(self):
-        self.move_index(-1)
-
-    def move_index(self, delta):
-        if not self.images or self.is_loading:
-            return
-        self.index += delta
-        self.index %= len(self.images)
-        self.update_image()
-        self.label.setPixmap(self.get_scaled_pixmap()) 
-        self.is_loading = False
+            self.move_index(1)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F:
@@ -84,11 +69,20 @@ class ImageViewer(QWidget):
         elif event.key() == Qt.Key_Escape and self.isFullScreen():
             self.showNormal()
         elif event.key() == Qt.Key_Left:
-            self.show_prev_image()
+            self.move_index(-1)
         elif event.key() == Qt.Key_Right:
-            self.show_next_image()
+            self.move_index(1)
+
+    def move_index(self, delta):
+        if not self.images or self.is_loading:
+            return
+        self.index += delta
+        self.index %= len(self.images)
+        self.load_pixmap()
+        self.display_pixmap() 
+        self.is_loading = False
  
-    def update_image(self):
+    def load_pixmap(self):
         ImageFile.LOAD_TRUNCATED_IMAGES = True
         self.is_loading = True
         image_path = self.images[self.index]
@@ -130,35 +124,23 @@ class ImageViewer(QWidget):
             data = image.tobytes("raw", "RGB")
             qimage = QImage(data, image.size[0], image.size[1], image.size[0]*3, QImage.Format_RGB888)
 
-        self.original_pixmap = QPixmap.fromImage(qimage)
-        self.label.setPixmap(self.original_pixmap)
+        self.pixmap = QPixmap.fromImage(qimage)
         self.is_loading = False
 
-    def get_scaled_pixmap(self):
-        pixmap = QPixmap(self.images[self.index])
-        if pixmap.width() > self.width() or pixmap.height() > self.height():
-            return self.original_pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    def display_pixmap(self):
+        if self.pixmap.width() > self.width() or self.pixmap.height() > self.height():
+            self.label.setPixmap(self.pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
-            return self.original_pixmap
+            self.label.setPixmap(self.pixmap)
  
     def resizeEvent(self, event):
         if self.images:
-            self.label.setPixmap(self.get_scaled_pixmap())
+            self.display_pixmap()
         super().resizeEvent(event)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
-
-    def closeEvent(self, event):
-        config = {
-            'history': self.history,
-            'position': [self.x(), self.y()],
-            'size': [self.width(), self.height()],
-        }
-        with open(self.config_path, 'w') as f:
-            json.dump(config, f)
-        event.accept()
 
     def dropEvent(self, event):
         self.images = []
@@ -184,8 +166,23 @@ class ImageViewer(QWidget):
             if dir_path in self.history:
                 del self.history[dir_path]
             self.history = OrderedDict([(dir_path, None)] + list(self.history.items())[-19:])
-            self.update_image()
-            self.label.setPixmap(self.get_scaled_pixmap())
+            self.load_pixmap()
+            self.display_pixmap()
+
+    def load_images_from_dir(self, dir_path):
+        self.images = []
+        files = sorted(os.listdir(dir_path))
+        for file in files:
+            if file.lower().endswith(('.png', '.xpm', '.gif', '.bmp', '.jpg')):
+                self.images.append(os.path.normpath(os.path.join(dir_path, file)))
+
+        if self.images:
+            if dir_path in self.history:
+                del self.history[dir_path]
+            self.history = OrderedDict([(dir_path, None)] + list(self.history.items())[-19:])
+            self.index = 0
+            self.load_pixmap()
+            self.display_pixmap()
 
     def show_context_menu(self, position):
         context_menu = QMenu(self)
@@ -212,20 +209,15 @@ class ImageViewer(QWidget):
         else:
             subprocess.Popen(['xdg-open', os.path.normpath(path)])
 
-    def load_images_from_dir(self, dir_path):
-        self.images = []
-        files = sorted(os.listdir(dir_path))
-        for file in files:
-            if file.lower().endswith(('.png', '.xpm', '.gif', '.bmp', '.jpg')):
-                self.images.append(os.path.normpath(os.path.join(dir_path, file)))
-
-        if self.images:
-            if dir_path in self.history:
-                del self.history[dir_path]
-            self.history = OrderedDict([(dir_path, None)] + list(self.history.items())[-19:])
-            self.index = 0
-            self.update_image()
-            self.label.setPixmap(self.get_scaled_pixmap())
+    def closeEvent(self, event):
+        config = {
+            'history': self.history,
+            'position': [self.x(), self.y()],
+            'size': [self.width(), self.height()],
+        }
+        with open(self.config_path, 'w') as f:
+            json.dump(config, f)
+        event.accept()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
