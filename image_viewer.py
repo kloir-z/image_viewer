@@ -149,9 +149,9 @@ class ImageViewer(QWidget):
         if len(urls) != 1:
             return
         path = urls[0].toLocalFile()
-        filename = None
         if os.path.isdir(path):
             dir_path = os.path.normpath(path)
+            filename = None
         else:
             dir_path = os.path.normpath(os.path.dirname(path))
             filename = os.path.basename(path)
