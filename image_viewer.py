@@ -168,12 +168,11 @@ class ImageViewer(QWidget):
         self.setup_images_and_index(dir_path, filename)
 
     def update_history(self):
-        if self.images: 
-            dir_path = os.path.normpath(os.path.dirname(self.images[self.index]))
-            filename = os.path.basename(self.images[self.index])
-            if dir_path in self.history:
-                del self.history[dir_path]
-            self.history = OrderedDict([(dir_path, filename)] + list(self.history.items())[-19:])
+        dir_path = os.path.normpath(os.path.dirname(self.images[self.index]))
+        filename = os.path.basename(self.images[self.index])
+        if dir_path in self.history:
+            del self.history[dir_path]
+        self.history = OrderedDict([(dir_path, filename)] + list(self.history.items())[-19:])
 
     def setup_images_and_index(self, dir_path, filename=None):
         if self.images:
