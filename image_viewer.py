@@ -97,24 +97,9 @@ class ImageViewer(QWidget):
 
             try:
                 exif = image._getexif()
+                image = self.rotate_image_according_to_exif(image, exif)
             except AttributeError:
                 exif = None
-            if exif is not None:
-                orientation = exif.get(0x0112)
-                if orientation == 2:
-                    image = image.transpose(Image.FLIP_LEFT_RIGHT)
-                elif orientation == 3:
-                    image = image.transpose(Image.ROTATE_180)
-                elif orientation == 4:
-                    image = image.transpose(Image.FLIP_TOP_BOTTOM)
-                elif orientation == 5:
-                    image = image.transpose(Image.ROTATE_270).transpose(Image.FLIP_LEFT_RIGHT)
-                elif orientation == 6:
-                    image = image.transpose(Image.ROTATE_270)
-                elif orientation == 7:
-                    image = image.transpose(Image.ROTATE_90).transpose(Image.FLIP_LEFT_RIGHT)
-                elif orientation == 8:
-                    image = image.transpose(Image.ROTATE_90)
 
             if image.mode != "RGB":
                 image = image.convert("RGB")
@@ -124,6 +109,25 @@ class ImageViewer(QWidget):
 
         self.pixmap = QPixmap.fromImage(qimage)
         self.is_loading = False
+
+    def rotate_image_according_to_exif(self, image, exif):
+        if exif is not None:
+            orientation = exif.get(0x0112)
+            if orientation == 2:
+                image = image.transpose(Image.FLIP_LEFT_RIGHT)
+            elif orientation == 3:
+                image = image.transpose(Image.ROTATE_180)
+            elif orientation == 4:
+                image = image.transpose(Image.FLIP_TOP_BOTTOM)
+            elif orientation == 5:
+                image = image.transpose(Image.ROTATE_270).transpose(Image.FLIP_LEFT_RIGHT)
+            elif orientation == 6:
+                image = image.transpose(Image.ROTATE_270)
+            elif orientation == 7:
+                image = image.transpose(Image.ROTATE_90).transpose(Image.FLIP_LEFT_RIGHT)
+            elif orientation == 8:
+                image = image.transpose(Image.ROTATE_90)
+        return image
 
     def display_pixmap(self):
         if self.pixmap.width() > self.width() or self.pixmap.height() > self.height():
