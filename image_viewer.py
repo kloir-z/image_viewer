@@ -19,6 +19,7 @@ class ImageViewer(QWidget):
     def __init__(self):
         super().__init__()
 
+        self.is_loading = False
         self.index = 0
         self.images = []
         self.config_path = 'config.json'
@@ -27,7 +28,7 @@ class ImageViewer(QWidget):
         if os.path.exists(self.config_path):
             with open(self.config_path, 'r') as f:
                 config = json.load(f)
-            history = list(config.get('history', {}).keys())[::-1] 
+            history = list(config.get('history', {}).keys()) 
             position = config.get('position', [0, 0])
             size = config.get('size', [800, 800])
         else:
@@ -42,19 +43,16 @@ class ImageViewer(QWidget):
 
         self.label = ResizableLabel()
         self.layout.addWidget(self.label)
-        
-        self.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.customContextMenuRequested.connect(self.show_context_menu)
 
         self.setAcceptDrops(True)
 
         self.resize(*size)
         self.move(*position)
-
-        self.original_pixmap = None
-        self.is_loading = False
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
+        
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self.show_context_menu)
 
     def mousePressEvent(self, event):
         x = event.x()
