@@ -28,7 +28,7 @@ class ImageViewer(QWidget):
         if os.path.exists(self.config_path):
             with open(self.config_path, 'r') as f:
                 config = json.load(f)
-            history = list(config.get('history', {}).keys()) 
+            history = config.get('history', {})
             position = config.get('position', [0, 0])
             size = config.get('size', [800, 800])
         else:
@@ -36,7 +36,7 @@ class ImageViewer(QWidget):
             position = [0, 0]
             size = [800, 800]
 
-        self.history = OrderedDict.fromkeys(history)
+        self.history = OrderedDict(history)
 
         self.layout = QVBoxLayout()
         self.setLayout(self.layout)
@@ -145,62 +145,65 @@ class ImageViewer(QWidget):
             event.acceptProposedAction()
 
     def dropEvent(self, event):
-        self.images = []
-        dropped_file_path = None
-        for url in event.mimeData().urls():
-            path = url.toLocalFile()
-            if os.path.isdir(path):
-                dir_path = path
-            else:
-                if path.lower().endswith(tuple(self.supported_extensions)):
-                    dropped_file_path = os.path.normpath(path)
-                dir_path = os.path.dirname(path)
-            files = sorted(os.listdir(dir_path))
-            for file in files:
-                if file.lower().endswith(tuple(self.supported_extensions)):
-                    self.images.append(os.path.normpath(os.path.join(dir_path, file)))
-        if dropped_file_path:
-            self.index = self.images.index(dropped_file_path)
+        urls = event.mimeData().urls()
+        if len(urls) != 1:
+            return
+        path = urls[0].toLocalFile()
+        filename = None
+        if os.path.isdir(path):
+            dir_path = os.path.normpath(path)
         else:
-            self.index = 0
+            dir_path = os.path.normpath(os.path.dirname(path))
+            filename = os.path.basename(path)
+        self.load_images_from_dir(dir_path, filename)
 
+    def load_images_from_dir(self, dir_path, filename=None):
         if self.images:
-            if dir_path in self.history:
-                del self.history[dir_path]
-            self.history = OrderedDict([(dir_path, None)] + list(self.history.items())[-19:])
-            self.load_pixmap()
-            self.display_pixmap()
-
-    def load_images_from_dir(self, dir_path):
+            self.update_history()
         self.images = []
         files = sorted(os.listdir(dir_path))
         for file in files:
-            if file.lower().endswith(('.png', '.xpm', '.gif', '.bmp', '.jpg')):
+            if file.lower().endswith(tuple(self.supported_extensions)):
                 self.images.append(os.path.normpath(os.path.join(dir_path, file)))
+        self.setup_images_and_index(dir_path, filename)
 
-        if self.images:
+    def update_history(self):
+        if self.images: 
+            dir_path = os.path.normpath(os.path.dirname(self.images[self.index]))
+            filename = os.path.basename(self.images[self.index])
             if dir_path in self.history:
                 del self.history[dir_path]
-            self.history = OrderedDict([(dir_path, None)] + list(self.history.items())[-19:])
-            self.index = 0
+            self.history = OrderedDict([(dir_path, filename)] + list(self.history.items())[-19:])
+
+    def setup_images_and_index(self, dir_path, filename=None):
+        if self.images:
+            if filename:
+                image_filenames = [os.path.basename(img_path) for img_path in self.images]
+                if filename in image_filenames:
+                    self.index = image_filenames.index(filename)
+            else:
+                last_displayed_image = self.history.get(dir_path)
+                image_filenames = [os.path.basename(img_path) for img_path in self.images]
+                if last_displayed_image is not None and last_displayed_image in image_filenames:
+                    self.index = image_filenames.index(last_displayed_image)
+                else:
+                    self.index = 0
+            self.update_history()
             self.load_pixmap()
             self.display_pixmap()
 
     def show_context_menu(self, position):
         context_menu = QMenu(self)
-
-        for dir_path in list(self.history.keys()):
+        for dir_path in list(self.history.keys()): 
             if os.path.exists(dir_path):
                 action = QAction(dir_path, self)
                 action.triggered.connect(lambda _, d=dir_path: self.load_images_from_dir(d))
                 context_menu.addAction(action)
-        
         if self.images:
-            current_dir = os.path.dirname(self.images[self.index])
+            current_dir = os.path.normpath(os.path.dirname(self.images[self.index]))
             open_in_explorer_action = QAction(f"###Open current dir in explorer###", self)
             open_in_explorer_action.triggered.connect(lambda: self.open_in_explorer(current_dir))
             context_menu.addAction(open_in_explorer_action)
-
         context_menu.exec_(self.mapToGlobal(position))
 
     def open_in_explorer(self, path):
@@ -212,6 +215,8 @@ class ImageViewer(QWidget):
             subprocess.Popen(['xdg-open', os.path.normpath(path)])
 
     def closeEvent(self, event):
+        if self.images:
+            self.update_history()
         config = {
             'history': self.history,
             'position': [self.x(), self.y()],
