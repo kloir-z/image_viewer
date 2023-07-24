@@ -62,6 +62,13 @@ class ImageViewer(QWidget):
         elif x > self.width() * 0.75:
             self.move_index(1)
 
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        if delta < 0:
+            self.move_index(1)
+        elif delta > 0:
+            self.move_index(-1)
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F:
             self.showFullScreen()
