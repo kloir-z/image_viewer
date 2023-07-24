@@ -1,4 +1,4 @@
-# PyQt Image Viewer
+# Simpole Image Viewer
 
 This is a PyQt based application that provides an interactive image viewer. You can navigate through images, show them in full screen mode, and access them via context menu. The application keeps a history of the directories accessed and allows you to re-open those directories quickly. It also supports drag and drop feature for image files and directories.
 
