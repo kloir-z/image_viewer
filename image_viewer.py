@@ -3,7 +3,7 @@ import re
 import sys
 import json
 from datetime import datetime
-from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QSizePolicy ,QMenu, QAction
+from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QSizePolicy ,QMenu, QAction, QMessageBox
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt
 from PIL import Image, ImageFile
@@ -205,15 +205,34 @@ class ImageViewer(QWidget):
         context_menu = QMenu(self)
         for dir_path in list(self.history.keys()): 
             if os.path.exists(dir_path):
-                action = QAction(dir_path, self)
-                action.triggered.connect(lambda _, d=dir_path: self.load_images_from_dir(d))
-                context_menu.addAction(action)
+                dir_menu = context_menu.addMenu(dir_path)
+            
+                open_action = QAction('Open', self)
+                open_action.triggered.connect(lambda _, d=dir_path: self.load_images_from_dir(d))
+                dir_menu.addAction(open_action)
+
+                delete_action = QAction('Delete from history', self)
+                delete_action.triggered.connect(lambda _, d=dir_path: self.delete_from_history(d))
+                dir_menu.addAction(delete_action)
+
         if self.images:
             current_dir = os.path.normpath(os.path.dirname(self.images[self.index]))
             open_in_explorer_action = QAction(f"###Open current dir in explorer###", self)
             open_in_explorer_action.triggered.connect(lambda: self.open_in_explorer(current_dir))
             context_menu.addAction(open_in_explorer_action)
         context_menu.exec_(self.mapToGlobal(position))
+
+    def delete_from_history(self, dir_path):
+        reply = QMessageBox.warning(self, 'History deletion', 
+                                    f'Are you sure you want to delete {dir_path} from history?',
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            if dir_path in self.history:
+                del self.history[dir_path]
+
+                if self.images and dir_path == os.path.normpath(os.path.dirname(self.images[self.index])):
+                    self.images = []
+                    self.label.clear()
 
     def open_in_explorer(self, path):
         if sys.platform == "win32":
