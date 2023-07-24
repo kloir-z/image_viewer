@@ -2,4 +2,6 @@ build
 dist
 venv
 image_viewer.spec
+image_viewer.vbs
+image_viewer.bat
 config.json
