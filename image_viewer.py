@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import json
 from datetime import datetime
@@ -161,7 +162,9 @@ class ImageViewer(QWidget):
         if self.images:
             self.update_history()
         self.images = []
-        files = sorted(os.listdir(dir_path))
+        def natural_sort_key(s):
+            return [int(text) if text.isdigit() else text for text in re.split(r'(\d+)', s)]
+        files = sorted(os.listdir(dir_path), key=natural_sort_key)
         for file in files:
             if file.lower().endswith(tuple(self.supported_extensions)):
                 self.images.append(os.path.normpath(os.path.join(dir_path, file)))
