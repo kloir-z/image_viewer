@@ -3,7 +3,7 @@ import re
 import sys
 import json
 from datetime import datetime
-from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QSizePolicy ,QMenu, QAction, QMessageBox
+from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QSizePolicy ,QMenu, QAction, QMessageBox, QProgressBar
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt
 from PIL import Image, ImageFile
@@ -41,6 +41,28 @@ class ImageViewer(QWidget):
 
         self.layout = QVBoxLayout()
         self.setLayout(self.layout)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(0)  
+
+        self.progress_bar_dragging = False
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setMaximumHeight(10)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: none;
+                background-color: transparent;
+            }
+            QProgressBar::chunk {
+                background-color: #007bff;
+            }
+        """)
+        self.progress_bar.mousePressEvent = self.progress_bar_clicked
+        self.progress_bar.mousePressEvent = self.progress_bar_pressed
+        self.progress_bar.mouseReleaseEvent = self.progress_bar_released
+        self.layout.addWidget(self.progress_bar)
 
         self.label = ResizableLabel()
         self.layout.addWidget(self.label)
@@ -54,6 +76,39 @@ class ImageViewer(QWidget):
         
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
+
+    def update_progress_bar(self, value):
+        self.progress_bar.setValue(int(value))
+
+    def progress_bar_clicked(self, event):
+        if self.images:
+            x = event.pos().x()
+            width = self.progress_bar.width()
+            percentage = x / width
+            index = int(percentage * (len(self.images) - 1))
+            self.index = max(0, min(index, len(self.images) - 1))
+            self.update_image()
+
+    def progress_bar_pressed(self, event):
+        self.progress_bar_dragging = True
+        self.progress_bar_clicked(event)
+
+    def progress_bar_released(self, event):
+        self.progress_bar_dragging = False
+
+    def mouseMoveEvent(self, event):
+        if self.progress_bar_dragging:
+            self.progress_bar_clicked(event)
+        super().mouseMoveEvent(event)
+
+    def update_image(self):
+        if self.images:
+            self.load_pixmap()
+            self.display_pixmap()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.progress_bar.setFixedWidth(self.width())
 
     def mousePressEvent(self, event):
         x = event.x()
@@ -101,7 +156,14 @@ class ImageViewer(QWidget):
             weekday_conversion = {"Mon": "月", "Tue": "火", "Wed": "水", "Thu": "木", "Fri": "金", "Sat": "土", "Sun": "日"}
             for eng, jp in weekday_conversion.items():
                 formatted_time = formatted_time.replace(eng, jp)
-            self.setWindowTitle(f"{os.path.basename(image_path)} - {formatted_time} - {self.index + 1}/{len(self.images)}")
+
+            total = len(self.images)
+            if total > 0:
+                percent = (self.index + 1) / total * 100
+                self.update_progress_bar(percent)
+                self.setWindowTitle(f"{os.path.basename(image_path)} - {formatted_time} - {self.index + 1}/{total}")
+            else:
+                self.setWindowTitle("No images loaded")
 
             try:
                 exif = image._getexif()
