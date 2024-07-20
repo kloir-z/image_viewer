@@ -3,18 +3,20 @@ import re
 import sys
 import json
 from datetime import datetime
-from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QSizePolicy ,QMenu, QAction, QMessageBox, QProgressBar
+from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QSizePolicy, QMenu, QAction, QMessageBox, QProgressBar
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt
 from PIL import Image, ImageFile
 from collections import OrderedDict
 import subprocess
 
+
 class ResizableLabel(QLabel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.setAlignment(Qt.AlignCenter)
+
 
 class ImageViewer(QWidget):
     def __init__(self):
@@ -23,15 +25,15 @@ class ImageViewer(QWidget):
         self.is_loading = False
         self.index = 0
         self.images = []
-        self.config_path = 'config.json'
-        self.supported_extensions = ['.png', '.xpm', '.gif', '.bmp', '.jpg']
+        self.config_path = "config.json"
+        self.supported_extensions = [".png", ".xpm", ".gif", ".bmp", ".jpg"]
 
         if os.path.exists(self.config_path):
-            with open(self.config_path, 'r') as f:
+            with open(self.config_path, "r") as f:
                 config = json.load(f)
-            history = config.get('history', {})
-            position = config.get('position', [0, 0])
-            size = config.get('size', [800, 800])
+            history = config.get("history", {})
+            position = config.get("position", [0, 0])
+            size = config.get("size", [800, 800])
         else:
             history = []
             position = [0, 0]
@@ -42,7 +44,7 @@ class ImageViewer(QWidget):
         self.layout = QVBoxLayout()
         self.setLayout(self.layout)
         self.layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.setSpacing(0)  
+        self.layout.setSpacing(0)
 
         self.progress_bar_dragging = False
         self.progress_bar = QProgressBar(self)
@@ -50,7 +52,8 @@ class ImageViewer(QWidget):
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.progress_bar.setStyleSheet("""
+        self.progress_bar.setStyleSheet(
+            """
             QProgressBar {
                 border: none;
                 background-color: transparent;
@@ -58,7 +61,8 @@ class ImageViewer(QWidget):
             QProgressBar::chunk {
                 background-color: #007bff;
             }
-        """)
+            """
+        )
         self.progress_bar.mousePressEvent = self.progress_bar_clicked
         self.progress_bar.mousePressEvent = self.progress_bar_pressed
         self.progress_bar.mouseReleaseEvent = self.progress_bar_released
@@ -73,7 +77,7 @@ class ImageViewer(QWidget):
         self.move(*position)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
-        
+
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
 
@@ -140,14 +144,14 @@ class ImageViewer(QWidget):
         self.index += delta
         self.index %= len(self.images)
         self.load_pixmap()
-        self.display_pixmap() 
+        self.display_pixmap()
         self.is_loading = False
- 
+
     def load_pixmap(self):
         ImageFile.LOAD_TRUNCATED_IMAGES = True
         self.is_loading = True
         image_path = self.images[self.index]
-        with open(image_path, 'rb') as f:
+        with open(image_path, "rb") as f:
             image = Image.open(f)
 
             creation_time = os.path.getmtime(image_path)
@@ -175,7 +179,7 @@ class ImageViewer(QWidget):
                 image = image.convert("RGB")
 
             data = image.tobytes("raw", "RGB")
-            qimage = QImage(data, image.size[0], image.size[1], image.size[0]*3, QImage.Format_RGB888)
+            qimage = QImage(data, image.size[0], image.size[1], image.size[0] * 3, QImage.Format_RGB888)
 
         self.pixmap = QPixmap.fromImage(qimage)
         self.is_loading = False
@@ -204,11 +208,6 @@ class ImageViewer(QWidget):
             self.label.setPixmap(self.pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             self.label.setPixmap(self.pixmap)
- 
-    def resizeEvent(self, event):
-        if self.images:
-            self.display_pixmap()
-        super().resizeEvent(event)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -231,8 +230,10 @@ class ImageViewer(QWidget):
         if self.images:
             self.update_history()
         self.images = []
+
         def natural_sort_key(s):
-            return [int(text) if text.isdigit() else text for text in re.split(r'(\d+)', s)]
+            return [int(text) if text.isdigit() else text for text in re.split(r"(\d+)", s)]
+
         files = sorted(os.listdir(dir_path), key=natural_sort_key)
         for file in files:
             if file.lower().endswith(tuple(self.supported_extensions)):
@@ -265,29 +266,27 @@ class ImageViewer(QWidget):
 
     def show_context_menu(self, position):
         context_menu = QMenu(self)
-        for dir_path in list(self.history.keys()): 
+        for dir_path in list(self.history.keys()):
             if os.path.exists(dir_path):
                 dir_menu = context_menu.addMenu(dir_path)
-            
-                open_action = QAction('Open', self)
+
+                open_action = QAction("Open", self)
                 open_action.triggered.connect(lambda _, d=dir_path: self.load_images_from_dir(d))
                 dir_menu.addAction(open_action)
 
-                delete_action = QAction('Delete from history', self)
+                delete_action = QAction("Delete from history", self)
                 delete_action.triggered.connect(lambda _, d=dir_path: self.delete_from_history(d))
                 dir_menu.addAction(delete_action)
 
         if self.images:
             current_dir = os.path.normpath(os.path.dirname(self.images[self.index]))
-            open_in_explorer_action = QAction(f"###Open current dir in explorer###", self)
+            open_in_explorer_action = QAction("###Open current dir in explorer###", self)
             open_in_explorer_action.triggered.connect(lambda: self.open_in_explorer(current_dir))
             context_menu.addAction(open_in_explorer_action)
         context_menu.exec_(self.mapToGlobal(position))
 
     def delete_from_history(self, dir_path):
-        reply = QMessageBox.warning(self, 'History deletion', 
-                                    f'Are you sure you want to delete {dir_path} from history?',
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        reply = QMessageBox.warning(self, "History deletion", f"Are you sure you want to delete {dir_path} from history?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
             if dir_path in self.history:
                 del self.history[dir_path]
@@ -298,23 +297,24 @@ class ImageViewer(QWidget):
 
     def open_in_explorer(self, path):
         if sys.platform == "win32":
-            subprocess.Popen(['explorer', os.path.normpath(path)])
+            subprocess.Popen(["explorer", os.path.normpath(path)])
         elif sys.platform == "darwin":
-            subprocess.Popen(['open', os.path.normpath(path)])
+            subprocess.Popen(["open", os.path.normpath(path)])
         else:
-            subprocess.Popen(['xdg-open', os.path.normpath(path)])
+            subprocess.Popen(["xdg-open", os.path.normpath(path)])
 
     def closeEvent(self, event):
         if self.images:
             self.update_history()
         config = {
-            'history': self.history,
-            'position': [self.x(), self.y()],
-            'size': [self.width(), self.height()],
+            "history": self.history,
+            "position": [self.x(), self.y()],
+            "size": [self.width(), self.height()],
         }
-        with open(self.config_path, 'w') as f:
+        with open(self.config_path, "w") as f:
             json.dump(config, f)
         event.accept()
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
