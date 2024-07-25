@@ -110,10 +110,6 @@ class ImageViewer(QWidget):
             self.load_pixmap()
             self.display_pixmap()
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self.progress_bar.setFixedWidth(self.width())
-
     def mousePressEvent(self, event):
         x = event.x()
         if x < self.width() * 0.25:
@@ -208,6 +204,11 @@ class ImageViewer(QWidget):
             self.label.setPixmap(self.pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             self.label.setPixmap(self.pixmap)
+
+    def resizeEvent(self, event):
+        if self.images:
+            self.display_pixmap()
+        super().resizeEvent(event)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
