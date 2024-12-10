@@ -3,7 +3,17 @@ import re
 import sys
 import json
 from datetime import datetime
-from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QSizePolicy, QMenu, QAction, QMessageBox, QProgressBar
+from PyQt5.QtWidgets import (
+    QApplication,
+    QWidget,
+    QLabel,
+    QVBoxLayout,
+    QSizePolicy,
+    QMenu,
+    QAction,
+    QMessageBox,
+    QProgressBar,
+)
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt
 from PIL import Image, ImageFile
@@ -153,15 +163,24 @@ class ImageViewer(QWidget):
             creation_time = os.path.getmtime(image_path)
             dt_object = datetime.fromtimestamp(creation_time)
             formatted_time = dt_object.strftime("%Y/%m/%d(%a) %H:%M:%S")
-            weekday_conversion = {"Mon": "月", "Tue": "火", "Wed": "水", "Thu": "木", "Fri": "金", "Sat": "土", "Sun": "日"}
+            weekday_conversion = {
+                "Mon": "月",
+                "Tue": "火",
+                "Wed": "水",
+                "Thu": "木",
+                "Fri": "金",
+                "Sat": "土",
+                "Sun": "日",
+            }
             for eng, jp in weekday_conversion.items():
                 formatted_time = formatted_time.replace(eng, jp)
 
             total = len(self.images)
             if total > 0:
                 percent = (self.index + 1) / total * 100
+                folder_name = os.path.basename(os.path.dirname(image_path))
                 self.update_progress_bar(percent)
-                self.setWindowTitle(f"{os.path.basename(image_path)} - {formatted_time} - {self.index + 1}/{total}")
+                self.setWindowTitle(f"{folder_name} - {os.path.basename(image_path)} - {formatted_time} - {self.index + 1}/{total}")
             else:
                 self.setWindowTitle("No images loaded")
 
@@ -175,7 +194,13 @@ class ImageViewer(QWidget):
                 image = image.convert("RGB")
 
             data = image.tobytes("raw", "RGB")
-            qimage = QImage(data, image.size[0], image.size[1], image.size[0] * 3, QImage.Format_RGB888)
+            qimage = QImage(
+                data,
+                image.size[0],
+                image.size[1],
+                image.size[0] * 3,
+                QImage.Format_RGB888,
+            )
 
         self.pixmap = QPixmap.fromImage(qimage)
         self.is_loading = False
@@ -239,14 +264,33 @@ class ImageViewer(QWidget):
         for file in files:
             if file.lower().endswith(tuple(self.supported_extensions)):
                 self.images.append(os.path.normpath(os.path.join(dir_path, file)))
+
+        subfolders = [f.path for f in os.scandir(dir_path) if f.is_dir()]
+        if subfolders:
+            reply = QMessageBox.question(
+                self,
+                "サブフォルダの読み込み",
+                "サブフォルダ内の画像ファイルも読み込みますか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                for subfolder in subfolders:
+                    subfiles = sorted(os.listdir(subfolder), key=natural_sort_key)
+                    for subfile in subfiles:
+                        if subfile.lower().endswith(tuple(self.supported_extensions)):
+                            self.images.append(os.path.normpath(os.path.join(subfolder, subfile)))
+
         self.setup_images_and_index(dir_path, filename)
 
     def update_history(self):
-        dir_path = os.path.normpath(os.path.dirname(self.images[self.index]))
+        dir_path = os.path.normpath(os.path.dirname(os.path.dirname(self.images[self.index])))
         filename = os.path.basename(self.images[self.index])
         if dir_path in self.history:
             del self.history[dir_path]
-        self.history = OrderedDict([(dir_path, filename)] + list(self.history.items())[-19:])
+        self.history[dir_path] = filename
+        if len(self.history) > 20:
+            self.history.popitem(last=False)
 
     def setup_images_and_index(self, dir_path, filename=None):
         if self.images:
@@ -267,7 +311,7 @@ class ImageViewer(QWidget):
 
     def show_context_menu(self, position):
         context_menu = QMenu(self)
-        for dir_path in list(self.history.keys()):
+        for dir_path in reversed(list(self.history.keys())):
             if os.path.exists(dir_path):
                 dir_menu = context_menu.addMenu(dir_path)
 
@@ -287,7 +331,13 @@ class ImageViewer(QWidget):
         context_menu.exec_(self.mapToGlobal(position))
 
     def delete_from_history(self, dir_path):
-        reply = QMessageBox.warning(self, "History deletion", f"Are you sure you want to delete {dir_path} from history?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        reply = QMessageBox.warning(
+            self,
+            "History deletion",
+            f"Are you sure you want to delete {dir_path} from history?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
         if reply == QMessageBox.Yes:
             if dir_path in self.history:
                 del self.history[dir_path]
