@@ -443,7 +443,7 @@ class ImageViewer(QWidget):
         self.setup_images_and_index(dir_path, filename)
 
     def update_history(self):
-        dir_path = os.path.normpath(os.path.dirname(os.path.dirname(self.images[self.index])))
+        dir_path = os.path.normpath(os.path.dirname(self.images[self.index]))
         filename = os.path.basename(self.images[self.index])
         if dir_path in self.history:
             del self.history[dir_path]
