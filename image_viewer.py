@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QDesktopWidget,
 )
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QColor
-from PyQt5.QtCore import Qt, QPoint
+from PyQt5.QtCore import Qt, QPoint, QTimer
 from PIL import Image, ImageFile
 from collections import OrderedDict
 import subprocess
@@ -43,6 +43,11 @@ class ImageViewer(QWidget):
         self.pan_start_pos = QPoint(0, 0)
         self.config_path = "config.json"
         self.supported_extensions = [".png", ".xpm", ".gif", ".bmp", ".jpg"]
+        self.click_count = 0
+        self.click_timer = QTimer()
+        self.click_timer.setSingleShot(True)
+        self.click_timer.timeout.connect(self.reset_click_count)
+        self.is_original_size = False
 
         if os.path.exists(self.config_path):
             with open(self.config_path, "r") as f:
@@ -151,6 +156,16 @@ class ImageViewer(QWidget):
             self.display_pixmap()
         super().mouseMoveEvent(event)
 
+    def reset_click_count(self):
+        self.click_count = 0
+
+    def toggle_original_size(self):
+        self.is_original_size = not self.is_original_size
+        self.zoom_factor = 1.0
+        self.pan_offset = QPoint(0, 0)
+        if self.images:
+            self.display_pixmap()
+
     def update_image(self):
         if self.images:
             self.load_pixmap()
@@ -163,11 +178,19 @@ class ImageViewer(QWidget):
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
             if not self.is_panning:
-                x = event.x()
-                if x < self.width() * 0.25:
-                    self.move_index(-1)
-                elif x > self.width() * 0.75:
-                    self.move_index(1)
+                self.click_count += 1
+                self.click_timer.start(300)
+
+                if self.click_count == 3:
+                    self.click_count = 0
+                    self.click_timer.stop()
+                    self.toggle_original_size()
+                elif self.click_count == 1:
+                    x = event.x()
+                    if x < self.width() * 0.25:
+                        self.move_index(-1)
+                    elif x > self.width() * 0.75:
+                        self.move_index(1)
             self.is_panning = False
 
     def mouseDoubleClickEvent(self, event):
@@ -177,6 +200,7 @@ class ImageViewer(QWidget):
     def reset_zoom(self):
         self.zoom_factor = 1.0
         self.pan_offset = QPoint(0, 0)
+        self.is_original_size = False
         if self.images:
             self.display_pixmap()
 
@@ -224,6 +248,7 @@ class ImageViewer(QWidget):
         self.index %= len(self.images)
         self.zoom_factor = 1.0
         self.pan_offset = QPoint(0, 0)
+        self.is_original_size = False
         self.load_pixmap()
         self.display_pixmap()
         self.is_loading = False
@@ -333,8 +358,11 @@ class ImageViewer(QWidget):
         return image
 
     def display_pixmap(self):
-        # 基準サイズを決定（ウィンドウより大きければ縮小、小さければ原寸）
-        if self.pixmap.width() > self.width() or self.pixmap.height() > self.height():
+        # 原寸表示モードの場合
+        if self.is_original_size:
+            base_pixmap = self.pixmap
+        # 通常モード: 基準サイズを決定（ウィンドウより大きければ縮小、小さければ原寸）
+        elif self.pixmap.width() > self.width() or self.pixmap.height() > self.height():
             base_pixmap = self.pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         else:
             base_pixmap = self.pixmap
@@ -438,6 +466,7 @@ class ImageViewer(QWidget):
                     self.index = 0
             self.zoom_factor = 1.0
             self.pan_offset = QPoint(0, 0)
+            self.is_original_size = False
             self.update_history()
             self.load_pixmap()
             self.display_pixmap()
