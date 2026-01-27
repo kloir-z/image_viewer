@@ -13,6 +13,8 @@ from PyQt5.QtWidgets import (
     QAction,
     QMessageBox,
     QProgressBar,
+    QCheckBox,
+    QDesktopWidget,
 )
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt
@@ -44,10 +46,12 @@ class ImageViewer(QWidget):
             history = config.get("history", {})
             position = config.get("position", [0, 0])
             size = config.get("size", [800, 800])
+            self.suppress_missing_file_warning = config.get("suppress_missing_file_warning", False)
         else:
             history = []
             position = [0, 0]
             size = [800, 800]
+            self.suppress_missing_file_warning = False
 
         self.history = OrderedDict(history)
 
@@ -84,12 +88,31 @@ class ImageViewer(QWidget):
         self.setAcceptDrops(True)
 
         self.resize(*size)
+        position = self.ensure_position_on_screen(position, size)
         self.move(*position)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
 
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
+
+    def ensure_position_on_screen(self, position, size):
+        desktop = QDesktopWidget()
+        x, y = position
+        width, height = size
+
+        for i in range(desktop.screenCount()):
+            screen_rect = desktop.screenGeometry(i)
+            window_right = x + width
+            window_bottom = y + height
+            if (x < screen_rect.right() and window_right > screen_rect.left() and
+                y < screen_rect.bottom() and window_bottom > screen_rect.top()):
+                return position
+
+        primary_screen = desktop.screenGeometry(desktop.primaryScreen())
+        new_x = max(primary_screen.left(), min(x, primary_screen.right() - width))
+        new_y = max(primary_screen.top(), min(y, primary_screen.bottom() - height))
+        return [new_x, new_y]
 
     def update_progress_bar(self, value):
         self.progress_bar.setValue(int(value))
@@ -157,6 +180,11 @@ class ImageViewer(QWidget):
         ImageFile.LOAD_TRUNCATED_IMAGES = True
         self.is_loading = True
         image_path = self.images[self.index]
+
+        if not os.path.exists(image_path):
+            self.handle_missing_file(image_path)
+            return
+
         with open(image_path, "rb") as f:
             image = Image.open(f)
 
@@ -204,6 +232,34 @@ class ImageViewer(QWidget):
 
         self.pixmap = QPixmap.fromImage(qimage)
         self.is_loading = False
+
+    def handle_missing_file(self, image_path):
+        if not self.suppress_missing_file_warning:
+            msg_box = QMessageBox(self)
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.setWindowTitle("ファイルが見つかりません")
+            msg_box.setText(f"ファイルが存在しません:\n{image_path}")
+
+            checkbox = QCheckBox("再度このメッセージを表示しない")
+            msg_box.setCheckBox(checkbox)
+            msg_box.exec_()
+
+            if checkbox.isChecked():
+                self.suppress_missing_file_warning = True
+
+        self.images.remove(image_path)
+
+        if not self.images:
+            self.label.clear()
+            self.setWindowTitle("No images loaded")
+            self.is_loading = False
+            return
+
+        if self.index >= len(self.images):
+            self.index = len(self.images) - 1
+
+        self.is_loading = False
+        self.load_pixmap()
 
     def rotate_image_according_to_exif(self, image, exif):
         if exif is not None:
@@ -361,6 +417,7 @@ class ImageViewer(QWidget):
             "history": self.history,
             "position": [self.x(), self.y()],
             "size": [self.width(), self.height()],
+            "suppress_missing_file_warning": self.suppress_missing_file_warning,
         }
         with open(self.config_path, "w") as f:
             json.dump(config, f)
