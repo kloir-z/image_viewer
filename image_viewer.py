@@ -16,8 +16,8 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QDesktopWidget,
 )
-from PyQt5.QtGui import QPixmap, QImage
-from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QPixmap, QImage, QPainter, QColor
+from PyQt5.QtCore import Qt, QPoint
 from PIL import Image, ImageFile
 from collections import OrderedDict
 import subprocess
@@ -37,6 +37,10 @@ class ImageViewer(QWidget):
         self.is_loading = False
         self.index = 0
         self.images = []
+        self.zoom_factor = 1.0
+        self.pan_offset = QPoint(0, 0)
+        self.is_panning = False
+        self.pan_start_pos = QPoint(0, 0)
         self.config_path = "config.json"
         self.supported_extensions = [".png", ".xpm", ".gif", ".bmp", ".jpg"]
 
@@ -124,6 +128,8 @@ class ImageViewer(QWidget):
             percentage = x / width
             index = int(percentage * (len(self.images) - 1))
             self.index = max(0, min(index, len(self.images) - 1))
+            self.zoom_factor = 1.0
+            self.pan_offset = QPoint(0, 0)
             self.update_image()
 
     def progress_bar_pressed(self, event):
@@ -136,6 +142,13 @@ class ImageViewer(QWidget):
     def mouseMoveEvent(self, event):
         if self.progress_bar_dragging:
             self.progress_bar_clicked(event)
+        elif event.buttons() & Qt.LeftButton:
+            if not self.is_panning:
+                self.is_panning = True
+            delta = event.pos() - self.pan_start_pos
+            self.pan_offset = self.pan_offset + delta
+            self.pan_start_pos = event.pos()
+            self.display_pixmap()
         super().mouseMoveEvent(event)
 
     def update_image(self):
@@ -144,18 +157,55 @@ class ImageViewer(QWidget):
             self.display_pixmap()
 
     def mousePressEvent(self, event):
-        x = event.x()
-        if x < self.width() * 0.25:
-            self.move_index(-1)
-        elif x > self.width() * 0.75:
-            self.move_index(1)
+        if event.button() == Qt.LeftButton:
+            self.pan_start_pos = event.pos()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            if not self.is_panning:
+                x = event.x()
+                if x < self.width() * 0.25:
+                    self.move_index(-1)
+                elif x > self.width() * 0.75:
+                    self.move_index(1)
+            self.is_panning = False
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton and (self.zoom_factor != 1.0 or self.pan_offset != QPoint(0, 0)):
+            self.reset_zoom()
+
+    def reset_zoom(self):
+        self.zoom_factor = 1.0
+        self.pan_offset = QPoint(0, 0)
+        if self.images:
+            self.display_pixmap()
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
-        if delta < 0:
-            self.move_index(1)
-        elif delta > 0:
-            self.move_index(-1)
+        if event.modifiers() == Qt.ControlModifier and self.images:
+            self.zoom_at_position(event.pos(), delta)
+        else:
+            if delta < 0:
+                self.move_index(1)
+            elif delta > 0:
+                self.move_index(-1)
+
+    def zoom_at_position(self, pos, delta):
+        old_zoom = self.zoom_factor
+        zoom_step = 1.1
+        if delta > 0:
+            self.zoom_factor *= zoom_step
+        else:
+            self.zoom_factor /= zoom_step
+        self.zoom_factor = max(0.1, min(self.zoom_factor, 10.0))
+
+        if old_zoom != self.zoom_factor:
+            label_center = QPoint(self.label.width() // 2, self.label.height() // 2)
+            mouse_offset = pos - label_center - self.pan_offset
+            scale_ratio = self.zoom_factor / old_zoom
+            new_mouse_offset = mouse_offset * scale_ratio
+            self.pan_offset = pos - label_center - new_mouse_offset
+            self.display_pixmap()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F:
@@ -172,6 +222,8 @@ class ImageViewer(QWidget):
             return
         self.index += delta
         self.index %= len(self.images)
+        self.zoom_factor = 1.0
+        self.pan_offset = QPoint(0, 0)
         self.load_pixmap()
         self.display_pixmap()
         self.is_loading = False
@@ -281,10 +333,33 @@ class ImageViewer(QWidget):
         return image
 
     def display_pixmap(self):
+        # 基準サイズを決定（ウィンドウより大きければ縮小、小さければ原寸）
         if self.pixmap.width() > self.width() or self.pixmap.height() > self.height():
-            self.label.setPixmap(self.pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            base_pixmap = self.pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         else:
-            self.label.setPixmap(self.pixmap)
+            base_pixmap = self.pixmap
+
+        if self.zoom_factor == 1.0 and self.pan_offset == QPoint(0, 0):
+            self.label.setPixmap(base_pixmap)
+        else:
+            if self.zoom_factor == 1.0:
+                display_pixmap = base_pixmap
+            else:
+                scaled_w = int(base_pixmap.width() * self.zoom_factor)
+                scaled_h = int(base_pixmap.height() * self.zoom_factor)
+                display_pixmap = self.pixmap.scaled(scaled_w, scaled_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+            result = QPixmap(self.label.size())
+            result.fill(QColor("#F0F0F0"))
+
+            x = (self.label.width() - display_pixmap.width()) // 2 + self.pan_offset.x()
+            y = (self.label.height() - display_pixmap.height()) // 2 + self.pan_offset.y()
+
+            painter = QPainter(result)
+            painter.drawPixmap(x, y, display_pixmap)
+            painter.end()
+
+            self.label.setPixmap(result)
 
     def resizeEvent(self, event):
         if self.images:
@@ -361,6 +436,8 @@ class ImageViewer(QWidget):
                     self.index = image_filenames.index(last_displayed_image)
                 else:
                     self.index = 0
+            self.zoom_factor = 1.0
+            self.pan_offset = QPoint(0, 0)
             self.update_history()
             self.load_pixmap()
             self.display_pixmap()
