@@ -20,7 +20,10 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QColor
 from PyQt5.QtCore import Qt, QPoint, QTimer
 from PIL import Image, ImageFile
+from pillow_heif import register_heif_opener
 from collections import OrderedDict
+
+register_heif_opener()
 import subprocess
 
 
@@ -43,7 +46,7 @@ class ImageViewer(QWidget):
         self.is_panning = False
         self.pan_start_pos = QPoint(0, 0)
         self.config_path = "config.json"
-        self.supported_extensions = [".png", ".xpm", ".gif", ".bmp", ".jpg"]
+        self.supported_extensions = [".png", ".xpm", ".gif", ".bmp", ".jpg", ".heic", ".heif"]
         self.click_count = 0
         self.click_timer = QTimer()
         self.click_timer.setSingleShot(True)
