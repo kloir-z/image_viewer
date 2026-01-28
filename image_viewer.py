@@ -52,6 +52,8 @@ class ImageViewer(QWidget):
         self.click_timer.setSingleShot(True)
         self.click_timer.timeout.connect(self.reset_click_count)
         self.is_original_size = False
+        self.current_root_path = None  # ユーザーが選択した親フォルダ
+        self.current_depth = 0  # 選択された階層数 (0=なし, 1-3=階層, -1=全階層)
 
         if os.path.exists(self.config_path):
             with open(self.config_path, "r") as f:
@@ -60,8 +62,22 @@ class ImageViewer(QWidget):
             position = config.get("position", [0, 0])
             size = config.get("size", [800, 800])
             self.suppress_missing_file_warning = config.get("suppress_missing_file_warning", False)
+            # 旧フォーマットから新フォーマットへの移行
+            migrated_history = {}
+            for key, value in history.items():
+                if isinstance(value, str):
+                    # 旧形式: {dir_path: filename}
+                    migrated_history[key] = {
+                        "root_path": key,
+                        "depth": 0,
+                        "last_image_path": os.path.join(key, value) if value else None
+                    }
+                elif isinstance(value, dict):
+                    # 新形式
+                    migrated_history[key] = value
+            history = migrated_history
         else:
-            history = []
+            history = {}
             position = [0, 0]
             size = [800, 800]
             self.suppress_missing_file_warning = False
@@ -415,10 +431,14 @@ class ImageViewer(QWidget):
             filename = os.path.basename(path)
         self.load_images_from_dir(dir_path, filename)
 
-    def load_images_from_dir(self, dir_path, filename=None):
+    def load_images_from_dir(self, dir_path, filename=None, from_history=False, saved_depth=None):
         if self.images:
             self.update_history()
         self.images = []
+
+        # ルートディレクトリを記録
+        self.current_root_path = os.path.normpath(dir_path)
+        self.current_depth = 0  # デフォルト値
 
         def natural_sort_key(s):
             return [int(text) if text.isdigit() else text for text in re.split(r"(\d+)", s)]
@@ -430,21 +450,39 @@ class ImageViewer(QWidget):
 
         subfolders = [f.path for f in os.scandir(dir_path) if f.is_dir()]
         if subfolders:
-            choices = ["読み込まない", "1階層", "2階層", "3階層", "全階層"]
-            choice, ok = QInputDialog.getItem(
-                self,
-                "サブフォルダの読み込み",
-                "サブフォルダ内の画像ファイルを読み込む階層を選択してください：",
-                choices,
-                0,
-                False,
-            )
-            if ok and choice != "読み込まない":
-                if choice == "全階層":
+            max_depth = None
+
+            if from_history and saved_depth is not None:
+                # 履歴から開く場合はダイアログをスキップ
+                self.current_depth = saved_depth
+                if saved_depth == 0:
+                    max_depth = None
+                elif saved_depth == -1:
                     max_depth = float("inf")
                 else:
-                    max_depth = int(choice[0])
+                    max_depth = saved_depth
+            else:
+                # ダイアログを表示
+                choices = ["読み込まない", "1階層", "2階層", "3階層", "全階層"]
+                choice, ok = QInputDialog.getItem(
+                    self,
+                    "サブフォルダの読み込み",
+                    "サブフォルダ内の画像ファイルを読み込む階層を選択してください：",
+                    choices,
+                    0,
+                    False,
+                )
+                if ok and choice != "読み込まない":
+                    if choice == "全階層":
+                        max_depth = float("inf")
+                        self.current_depth = -1
+                    else:
+                        max_depth = int(choice[0])
+                        self.current_depth = max_depth
+                else:
+                    self.current_depth = 0
 
+            if max_depth is not None and max_depth > 0:
                 def get_subfolders_recursive(path, current_depth, max_depth):
                     if current_depth > max_depth:
                         return []
@@ -472,27 +510,43 @@ class ImageViewer(QWidget):
         self.setup_images_and_index(dir_path, filename)
 
     def update_history(self):
-        dir_path = os.path.normpath(os.path.dirname(self.images[self.index]))
-        filename = os.path.basename(self.images[self.index])
-        if dir_path in self.history:
-            del self.history[dir_path]
-        self.history[dir_path] = filename
+        if not self.images or self.current_root_path is None:
+            return
+
+        current_image_path = os.path.normpath(self.images[self.index])
+        root_path = self.current_root_path
+
+        # 既存エントリを削除 (OrderedDictの末尾に移動するため)
+        if root_path in self.history:
+            del self.history[root_path]
+
+        # 新形式で保存
+        self.history[root_path] = {
+            "root_path": root_path,
+            "depth": self.current_depth,
+            "last_image_path": current_image_path
+        }
+
+        # 履歴の上限を維持
         if len(self.history) > 20:
             self.history.popitem(last=False)
 
-    def setup_images_and_index(self, dir_path, filename=None):
+    def setup_images_and_index(self, dir_path, filename=None, last_image_path=None):
         if self.images:
+            self.index = 0  # デフォルト
+
             if filename:
+                # ファイルを直接ドロップした場合: ファイル名で検索
                 image_filenames = [os.path.basename(img_path) for img_path in self.images]
                 if filename in image_filenames:
                     self.index = image_filenames.index(filename)
-            else:
-                last_displayed_image = self.history.get(dir_path)
-                image_filenames = [os.path.basename(img_path) for img_path in self.images]
-                if last_displayed_image is not None and last_displayed_image in image_filenames:
-                    self.index = image_filenames.index(last_displayed_image)
-                else:
-                    self.index = 0
+            elif last_image_path:
+                # 履歴から開いた場合: フルパスで検索
+                normalized_paths = [os.path.normpath(p) for p in self.images]
+                normalized_last = os.path.normpath(last_image_path)
+                if normalized_last in normalized_paths:
+                    self.index = normalized_paths.index(normalized_last)
+
             self.zoom_factor = 1.0
             self.pan_offset = QPoint(0, 0)
             self.is_original_size = False
@@ -500,14 +554,39 @@ class ImageViewer(QWidget):
             self.load_pixmap()
             self.display_pixmap()
 
+    def load_from_history(self, root_path, history_entry):
+        """履歴エントリから画像を読み込む"""
+        saved_depth = history_entry.get("depth", 0)
+        last_image_path = history_entry.get("last_image_path")
+
+        # 画像を読み込み (ダイアログをスキップ)
+        self.load_images_from_dir(
+            root_path,
+            filename=None,
+            from_history=True,
+            saved_depth=saved_depth
+        )
+
+        # 最後に見ていた画像の位置を復元
+        if last_image_path and self.images:
+            normalized_paths = [os.path.normpath(p) for p in self.images]
+            normalized_last = os.path.normpath(last_image_path)
+            if normalized_last in normalized_paths:
+                self.index = normalized_paths.index(normalized_last)
+                self.load_pixmap()
+                self.display_pixmap()
+
     def show_context_menu(self, position):
         context_menu = QMenu(self)
         for dir_path in reversed(list(self.history.keys())):
             if os.path.exists(dir_path):
+                history_entry = self.history[dir_path]
                 dir_menu = context_menu.addMenu(dir_path)
 
                 open_action = QAction("Open", self)
-                open_action.triggered.connect(lambda _, d=dir_path: self.load_images_from_dir(d))
+                open_action.triggered.connect(
+                    lambda _, d=dir_path, entry=history_entry: self.load_from_history(d, entry)
+                )
                 dir_menu.addAction(open_action)
 
                 delete_action = QAction("Delete from history", self)
@@ -533,9 +612,12 @@ class ImageViewer(QWidget):
             if dir_path in self.history:
                 del self.history[dir_path]
 
-                if self.images and dir_path == os.path.normpath(os.path.dirname(self.images[self.index])):
+                # current_root_path を使用して比較
+                if self.images and dir_path == self.current_root_path:
                     self.images = []
                     self.label.clear()
+                    self.current_root_path = None
+                    self.current_depth = 0
 
     def open_in_explorer(self, path):
         if sys.platform == "win32":
