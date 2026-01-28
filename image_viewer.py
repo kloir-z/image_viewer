@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
     QProgressBar,
     QCheckBox,
     QDesktopWidget,
+    QInputDialog,
 )
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QColor
 from PyQt5.QtCore import Qt, QPoint, QTimer
@@ -426,19 +427,44 @@ class ImageViewer(QWidget):
 
         subfolders = [f.path for f in os.scandir(dir_path) if f.is_dir()]
         if subfolders:
-            reply = QMessageBox.question(
+            choices = ["読み込まない", "1階層", "2階層", "3階層", "全階層"]
+            choice, ok = QInputDialog.getItem(
                 self,
                 "サブフォルダの読み込み",
-                "サブフォルダ内の画像ファイルも読み込みますか？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
+                "サブフォルダ内の画像ファイルを読み込む階層を選択してください：",
+                choices,
+                0,
+                False,
             )
-            if reply == QMessageBox.Yes:
-                for subfolder in subfolders:
-                    subfiles = sorted(os.listdir(subfolder), key=natural_sort_key)
-                    for subfile in subfiles:
-                        if subfile.lower().endswith(tuple(self.supported_extensions)):
-                            self.images.append(os.path.normpath(os.path.join(subfolder, subfile)))
+            if ok and choice != "読み込まない":
+                if choice == "全階層":
+                    max_depth = float("inf")
+                else:
+                    max_depth = int(choice[0])
+
+                def get_subfolders_recursive(path, current_depth, max_depth):
+                    if current_depth > max_depth:
+                        return []
+                    folders = []
+                    try:
+                        for f in os.scandir(path):
+                            if f.is_dir():
+                                folders.append(f.path)
+                                folders.extend(get_subfolders_recursive(f.path, current_depth + 1, max_depth))
+                    except PermissionError:
+                        pass
+                    return folders
+
+                all_subfolders = get_subfolders_recursive(dir_path, 1, max_depth)
+                all_subfolders.sort(key=natural_sort_key)
+                for subfolder in all_subfolders:
+                    try:
+                        subfiles = sorted(os.listdir(subfolder), key=natural_sort_key)
+                        for subfile in subfiles:
+                            if subfile.lower().endswith(tuple(self.supported_extensions)):
+                                self.images.append(os.path.normpath(os.path.join(subfolder, subfile)))
+                    except PermissionError:
+                        pass
 
         self.setup_images_and_index(dir_path, filename)
 
