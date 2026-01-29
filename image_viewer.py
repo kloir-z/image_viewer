@@ -3,7 +3,6 @@ import re
 import sys
 import json
 from datetime import datetime
-from urllib.parse import unquote
 from PyQt5.QtWidgets import (
     QApplication,
     QWidget,
@@ -423,7 +422,7 @@ class ImageViewer(QWidget):
         urls = event.mimeData().urls()
         if len(urls) != 1:
             return
-        path = unquote(urls[0].toLocalFile())
+        path = urls[0].toLocalFile()
         if os.path.isdir(path):
             dir_path = os.path.normpath(path)
             filename = None
