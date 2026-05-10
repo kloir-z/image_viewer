@@ -12,7 +12,6 @@ from PyQt5.QtWidgets import (
     QMenu,
     QAction,
     QMessageBox,
-    QProgressBar,
     QCheckBox,
     QDesktopWidget,
     QInputDialog,
@@ -32,6 +31,88 @@ class ResizableLabel(QLabel):
         super().__init__(*args, **kwargs)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.setAlignment(Qt.AlignCenter)
+
+
+class ProgressIndicator(QWidget):
+    """画像リスト用プログレスバー。1画像=1セグメントの精度で表示し、
+    フォルダ毎に2色を交互に塗ることで境界を視認できるようにする。"""
+
+    DONE_COLORS = ("#007bff", "#66b0ff")
+    PENDING_COLORS = ((0, 123, 255, 70), (102, 176, 255, 70))
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(10)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.images = []
+        self.index = 0
+        self.folder_runs = []  # [(start_idx, end_idx_inclusive, parity), ...]
+
+    def set_images(self, images, index=0):
+        self.images = images
+        self.index = index
+        self._compute_folder_runs()
+        self.update()
+
+    def set_index(self, index):
+        if index != self.index:
+            self.index = index
+            self.update()
+
+    def clear(self):
+        self.images = []
+        self.index = 0
+        self.folder_runs = []
+        self.update()
+
+    def _compute_folder_runs(self):
+        self.folder_runs = []
+        if not self.images:
+            return
+        parity = 0
+        start = 0
+        prev_dir = os.path.dirname(self.images[0])
+        for i in range(1, len(self.images)):
+            d = os.path.dirname(self.images[i])
+            if d != prev_dir:
+                self.folder_runs.append((start, i - 1, parity))
+                parity = 1 - parity
+                start = i
+                prev_dir = d
+        self.folder_runs.append((start, len(self.images) - 1, parity))
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        try:
+            w = self.width()
+            h = self.height()
+            n = len(self.images)
+            if n == 0 or w == 0:
+                return
+
+            done_qcolors = [QColor(c) for c in self.DONE_COLORS]
+            pending_qcolors = [QColor(*c) for c in self.PENDING_COLORS]
+
+            for start, end, parity in self.folder_runs:
+                x0 = int(start * w / n)
+                x_end = int((end + 1) * w / n)
+                if x_end <= x0:
+                    x_end = x0 + 1
+
+                if end <= self.index:
+                    painter.fillRect(x0, 0, x_end - x0, h, done_qcolors[parity])
+                elif start > self.index:
+                    painter.fillRect(x0, 0, x_end - x0, h, pending_qcolors[parity])
+                else:
+                    x_mid = int((self.index + 1) * w / n)
+                    if x_mid < x0:
+                        x_mid = x0
+                    if x_mid > x_end:
+                        x_mid = x_end
+                    painter.fillRect(x0, 0, x_mid - x0, h, done_qcolors[parity])
+                    painter.fillRect(x_mid, 0, x_end - x_mid, h, pending_qcolors[parity])
+        finally:
+            painter.end()
 
 
 class ImageViewer(QWidget):
@@ -54,6 +135,7 @@ class ImageViewer(QWidget):
         self.is_original_size = False
         self.current_root_path = None  # ユーザーが選択した親フォルダ
         self.current_depth = 0  # 選択された階層数 (0=なし, 1-3=階層, -1=全階層)
+        self.current_pickup_file = None  # 現在セッションのピックアップ保存先
 
         if os.path.exists(self.config_path):
             with open(self.config_path, "r") as f:
@@ -90,23 +172,7 @@ class ImageViewer(QWidget):
         self.layout.setSpacing(0)
 
         self.progress_bar_dragging = False
-        self.progress_bar = QProgressBar(self)
-        self.progress_bar.setMaximumHeight(10)
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.progress_bar.setStyleSheet(
-            """
-            QProgressBar {
-                border: none;
-                background-color: transparent;
-            }
-            QProgressBar::chunk {
-                background-color: #007bff;
-            }
-            """
-        )
-        self.progress_bar.mousePressEvent = self.progress_bar_clicked
+        self.progress_bar = ProgressIndicator(self)
         self.progress_bar.mousePressEvent = self.progress_bar_pressed
         self.progress_bar.mouseReleaseEvent = self.progress_bar_released
         self.layout.addWidget(self.progress_bar)
@@ -125,6 +191,8 @@ class ImageViewer(QWidget):
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
 
+        self.setStyleSheet("ImageViewer, ResizableLabel, ProgressIndicator { background-color: #2D2D2D; }")
+
     def ensure_position_on_screen(self, position, size):
         desktop = QDesktopWidget()
         x, y = position
@@ -142,9 +210,6 @@ class ImageViewer(QWidget):
         new_x = max(primary_screen.left(), min(x, primary_screen.right() - width))
         new_y = max(primary_screen.top(), min(y, primary_screen.bottom() - height))
         return [new_x, new_y]
-
-    def update_progress_bar(self, value):
-        self.progress_bar.setValue(int(value))
 
     def progress_bar_clicked(self, event):
         if self.images:
@@ -260,6 +325,8 @@ class ImageViewer(QWidget):
             self.move_index(-1)
         elif event.key() == Qt.Key_Right:
             self.move_index(1)
+        elif event.key() == Qt.Key_F5:
+            self.reload_current_dir()
 
     def move_index(self, delta):
         if not self.images or self.is_loading:
@@ -302,9 +369,8 @@ class ImageViewer(QWidget):
 
             total = len(self.images)
             if total > 0:
-                percent = (self.index + 1) / total * 100
                 folder_name = os.path.basename(os.path.dirname(image_path))
-                self.update_progress_bar(percent)
+                self.progress_bar.set_index(self.index)
                 self.setWindowTitle(f"{folder_name} - {os.path.basename(image_path)} - {formatted_time} - {self.index + 1}/{total}")
             else:
                 self.setWindowTitle("No images loaded")
@@ -349,12 +415,14 @@ class ImageViewer(QWidget):
         if not self.images:
             self.label.clear()
             self.setWindowTitle("No images loaded")
+            self.progress_bar.clear()
             self.is_loading = False
             return
 
         if self.index >= len(self.images):
             self.index = len(self.images) - 1
 
+        self.progress_bar.set_images(self.images, self.index)
         self.is_loading = False
         self.load_pixmap()
 
@@ -398,7 +466,7 @@ class ImageViewer(QWidget):
                 display_pixmap = self.pixmap.scaled(scaled_w, scaled_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
             result = QPixmap(self.label.size())
-            result.fill(QColor("#F0F0F0"))
+            result.fill(QColor("#2D2D2D"))
 
             x = (self.label.width() - display_pixmap.width()) // 2 + self.pan_offset.x()
             y = (self.label.height() - display_pixmap.height()) // 2 + self.pan_offset.y()
@@ -439,6 +507,7 @@ class ImageViewer(QWidget):
         # ルートディレクトリを記録
         self.current_root_path = os.path.normpath(dir_path)
         self.current_depth = 0  # デフォルト値
+        self.current_pickup_file = None  # フォルダ切り替え時にリセット
 
         def natural_sort_key(s):
             return [int(text) if text.isdigit() else text for text in re.split(r"(\d+)", s)]
@@ -551,6 +620,7 @@ class ImageViewer(QWidget):
             self.pan_offset = QPoint(0, 0)
             self.is_original_size = False
             self.update_history()
+            self.progress_bar.set_images(self.images, self.index)
             self.load_pixmap()
             self.display_pixmap()
 
@@ -595,6 +665,15 @@ class ImageViewer(QWidget):
 
         if self.images:
             current_dir = os.path.normpath(os.path.dirname(self.images[self.index]))
+
+            reload_action = QAction("再読み込み (F5)", self)
+            reload_action.triggered.connect(self.reload_current_dir)
+            context_menu.addAction(reload_action)
+
+            pickup_action = QAction("ファイル名の記録", self)
+            pickup_action.triggered.connect(self.pickup_current_image)
+            context_menu.addAction(pickup_action)
+
             open_in_explorer_action = QAction("###Open current dir in explorer###", self)
             open_in_explorer_action.triggered.connect(lambda: self.open_in_explorer(current_dir))
             context_menu.addAction(open_in_explorer_action)
@@ -616,8 +695,116 @@ class ImageViewer(QWidget):
                 if self.images and dir_path == self.current_root_path:
                     self.images = []
                     self.label.clear()
+                    self.progress_bar.clear()
                     self.current_root_path = None
                     self.current_depth = 0
+
+    def reload_current_dir(self):
+        """現在のフォルダを再スキャンして画像リストを更新。表示中の画像はそのまま維持。"""
+        if self.current_root_path is None or not os.path.exists(self.current_root_path):
+            return
+
+        current_image_path = (
+            os.path.normpath(self.images[self.index]) if self.images else None
+        )
+
+        def natural_sort_key(s):
+            return [int(text) if text.isdigit() else text for text in re.split(r"(\d+)", s)]
+
+        new_images: list[str] = []
+        try:
+            files = sorted(os.listdir(self.current_root_path), key=natural_sort_key)
+        except OSError:
+            return
+        for file in files:
+            if file.lower().endswith(tuple(self.supported_extensions)):
+                new_images.append(os.path.normpath(os.path.join(self.current_root_path, file)))
+
+        if self.current_depth != 0:
+            max_depth = float("inf") if self.current_depth == -1 else self.current_depth
+
+            def get_subfolders_recursive(path, depth, max_depth):
+                if depth > max_depth:
+                    return []
+                folders = []
+                try:
+                    for f in os.scandir(path):
+                        if f.is_dir():
+                            folders.append(f.path)
+                            folders.extend(get_subfolders_recursive(f.path, depth + 1, max_depth))
+                except (PermissionError, OSError):
+                    pass
+                return folders
+
+            all_subfolders = get_subfolders_recursive(self.current_root_path, 1, max_depth)
+            all_subfolders.sort(key=natural_sort_key)
+            for subfolder in all_subfolders:
+                try:
+                    subfiles = sorted(os.listdir(subfolder), key=natural_sort_key)
+                    for subfile in subfiles:
+                        if subfile.lower().endswith(tuple(self.supported_extensions)):
+                            new_images.append(os.path.normpath(os.path.join(subfolder, subfile)))
+                except (PermissionError, OSError):
+                    pass
+
+        old_count = len(self.images)
+        self.images = new_images
+        new_count = len(self.images)
+
+        if not self.images:
+            self.label.clear()
+            self.setWindowTitle("No images loaded")
+            self.progress_bar.clear()
+            return
+
+        if current_image_path and current_image_path in self.images:
+            # 表示中画像はそのまま: index 復元、タイトル/プログレスバーのみ更新
+            self.index = self.images.index(current_image_path)
+            self.progress_bar.set_images(self.images, self.index)
+            self.load_pixmap()  # title と progress を最新の総数で更新
+        else:
+            # 表示中画像が消えた場合は近傍にフォールバック
+            self.index = min(self.index, len(self.images) - 1)
+            self.zoom_factor = 1.0
+            self.pan_offset = QPoint(0, 0)
+            self.is_original_size = False
+            self.progress_bar.set_images(self.images, self.index)
+            self.load_pixmap()
+            self.display_pixmap()
+
+        diff = new_count - old_count
+        if diff > 0:
+            print(f"[reload] +{diff} files ({old_count} -> {new_count})")
+        elif diff < 0:
+            print(f"[reload] {diff} files ({old_count} -> {new_count})")
+
+    def pickup_current_image(self):
+        if not self.images or self.current_root_path is None:
+            return
+        current_image = self.images[self.index]
+        try:
+            rel_path = os.path.relpath(current_image, self.current_root_path)
+        except ValueError:
+            # 異なるドライブなど relpath が計算できない場合は絶対パスにフォールバック
+            rel_path = current_image
+        rel_path = rel_path.replace(os.sep, "/")
+
+        if self.current_pickup_file is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.current_pickup_file = os.path.join(
+                self.current_root_path,
+                f"imageviewer_pickup_{timestamp}.txt",
+            )
+
+        try:
+            with open(self.current_pickup_file, "a", encoding="utf-8") as f:
+                f.write(rel_path + "\n")
+        except OSError as e:
+            QMessageBox.warning(
+                self,
+                "保存失敗",
+                f"ピックアップファイルへの書き込みに失敗しました:\n{e}",
+            )
 
     def open_in_explorer(self, path):
         if sys.platform == "win32":
@@ -646,5 +833,16 @@ if __name__ == "__main__":
 
     viewer = ImageViewer()
     viewer.show()
+
+    if len(sys.argv) > 1:
+        arg_path = sys.argv[1]
+        if os.path.exists(arg_path):
+            if os.path.isdir(arg_path):
+                dir_path = os.path.normpath(arg_path)
+                filename = None
+            else:
+                dir_path = os.path.normpath(os.path.dirname(arg_path))
+                filename = os.path.basename(arg_path)
+            viewer.load_images_from_dir(dir_path, filename)
 
     sys.exit(app.exec_())
