@@ -59,7 +59,14 @@ The entire application is in [image_viewer.py](image_viewer.py):
 - **Missing file handling**: shows a "ファイルが見つかりません" warning with a "再度このメッセージを表示しない" checkbox; the suppression flag is persisted to `config.json`. Missing entries are dropped from the in-memory list.
 - **Pickup file**: "ファイル名の記録" appends the current image's path (relative to `current_root_path`) to a per-session `imageviewer_pickup_YYYYMMDD_HHMMSS.txt` in the root directory. The filename is generated once on first use within a session and reused until the user opens a different folder.
 - **History limit**: keeps last 20 directories
-- **Supported formats**: `.png`, `.xpm`, `.gif`, `.bmp`, `.jpg`, `.heic`, `.heif` (HEIC via `pillow-heif`)
+- **Supported formats**: defined in `self.supported_extensions`. Currently:
+  - PNG family: `.png`, `.apng`
+  - JPEG family: `.jpg`, `.jpeg`, `.jfif`, `.jpe`, `.mpo`
+  - `.gif`, `.bmp`, `.webp`
+  - TIFF: `.tif`, `.tiff`
+  - HEIC family: `.heic`, `.heif`, `.heics`, `.heifs`, `.hif` (via `pillow-heif`)
+  - Icons: `.ico`, `.cur`
+  - `.psd`, `.tga`, `.dds`, `.xpm`
 - **Off-screen window recovery**: on startup, if the saved window position falls outside any connected display, the window is repositioned onto the primary screen
 
 ## Configuration

@@ -127,7 +127,13 @@ Double-clicking the image will then open it directly in this viewer.
 
 ## Supported Formats
 
-PNG, JPG, BMP, GIF, XPM, HEIC, HEIF
+- PNG (`.png`, `.apng`)
+- JPEG (`.jpg`, `.jpeg`, `.jfif`, `.jpe`, `.mpo`)
+- GIF, BMP, WebP
+- TIFF (`.tif`, `.tiff`)
+- HEIC / HEIF (`.heic`, `.heif`, `.heics`, `.heifs`, `.hif`)
+- Icons (`.ico`, `.cur`)
+- PSD, TGA, DDS, XPM
 
 ## Configuration
 

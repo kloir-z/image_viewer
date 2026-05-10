@@ -127,7 +127,15 @@ class ImageViewer(QWidget):
         self.is_panning = False
         self.pan_start_pos = QPoint(0, 0)
         self.config_path = "config.json"
-        self.supported_extensions = [".png", ".xpm", ".gif", ".bmp", ".jpg", ".heic", ".heif"]
+        self.supported_extensions = [
+            ".png", ".apng",
+            ".jpg", ".jpeg", ".jfif", ".jpe", ".mpo",
+            ".gif", ".bmp", ".webp",
+            ".tif", ".tiff",
+            ".heic", ".heif", ".heics", ".heifs", ".hif",
+            ".ico", ".cur",
+            ".psd", ".tga", ".dds", ".xpm",
+        ]
         self.click_count = 0
         self.click_timer = QTimer()
         self.click_timer.setSingleShot(True)
