@@ -83,6 +83,7 @@ The entire application is in [image_viewer.py](image_viewer.py):
   - Icons: `.ico`, `.cur`
   - `.psd`, `.tga`, `.dds`, `.xpm`
 - **Off-screen window recovery**: on startup, if the saved window position falls outside any connected display, the window is repositioned onto the primary screen
+- **Window geometry persistence**: `_remember_normal_geometry()` (called from `moveEvent`/`resizeEvent`) continuously records the window's geometry only while it is *not* maximized/fullscreen, into `_normal_pos`/`_normal_size`. `closeEvent` saves those plus a `maximized` flag; on launch the window is restored to the normal geometry and then `showMaximized()`'d if the flag was set. This avoids saving the off-screen maximized geometry (negative frame offsets), which previously made the window drift on every open
 
 ## Configuration
 
@@ -91,7 +92,8 @@ The entire application is in [image_viewer.py](image_viewer.py):
 - `history`: `OrderedDict` of `root_path → { root_path, depth, last_image_path }`
   - `depth`: `0` = no subfolders, `1`/`2`/`3` = N levels, `-1` = all levels
   - Old `{ root_path: filename }` format is auto-migrated on load
-- `position`: window `[x, y]` coordinates
-- `size`: window `[width, height]`
+- `position`: window `[x, y]` coordinates (the *normal*, non-maximized geometry; maximized/fullscreen geometry is never saved here to avoid the window drifting on each open)
+- `size`: window `[width, height]` (normal geometry, as above)
+- `maximized`: bool, true if the window was maximized at close; restored via `showMaximized()` on next launch
 - `suppress_missing_file_warning`: bool, true once the user checks "don't show again"
 - `grid_columns`: int, number of columns in the thumbnail grid view (default 5, range 2–8)

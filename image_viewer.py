@@ -525,6 +525,7 @@ class ImageViewer(QWidget):
             size = config.get("size", [800, 800])
             self.suppress_missing_file_warning = config.get("suppress_missing_file_warning", False)
             self.grid_columns = config.get("grid_columns", 5)
+            self.start_maximized = config.get("maximized", False)
             # 旧フォーマットから新フォーマットへの移行
             migrated_history = {}
             for key, value in history.items():
@@ -545,6 +546,7 @@ class ImageViewer(QWidget):
             size = [800, 800]
             self.suppress_missing_file_warning = False
             self.grid_columns = 5
+            self.start_maximized = False
 
         self.history = OrderedDict(history)
 
@@ -583,6 +585,12 @@ class ImageViewer(QWidget):
         self.resize(*size)
         position = self.ensure_position_on_screen(position, size)
         self.move(*position)
+        # 最大化/フルスクリーンでない時の通常ジオメトリ。最大化中はウィンドウの
+        # x()/y()/width()/height() が画面外にはみ出した最大化座標を返すため、
+        # それをそのまま保存・復元すると開くたびに位置がずれていく。これを防ぐため
+        # 通常状態のジオメトリを常時記憶し、保存時はこちらを使う。
+        self._normal_pos = [position[0], position[1]]
+        self._normal_size = [size[0], size[1]]
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
 
@@ -883,9 +891,20 @@ class ImageViewer(QWidget):
 
             self.label.setPixmap(result)
 
+    def _remember_normal_geometry(self):
+        # 最大化/フルスクリーン中の座標は保存対象にしない (ずれの原因になるため)
+        if not (self.isMaximized() or self.isFullScreen()):
+            self._normal_pos = [self.x(), self.y()]
+            self._normal_size = [self.width(), self.height()]
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._remember_normal_geometry()
+
     def resizeEvent(self, event):
         if self.images and not self.grid_mode:
             self.display_pixmap()
+        self._remember_normal_geometry()
         super().resizeEvent(event)
 
     def dragEnterEvent(self, event):
@@ -1351,8 +1370,9 @@ class ImageViewer(QWidget):
         self.thumb_loader.stop()
         config = {
             "history": self.history,
-            "position": [self.x(), self.y()],
-            "size": [self.width(), self.height()],
+            "position": self._normal_pos,
+            "size": self._normal_size,
+            "maximized": self.isMaximized(),
             "suppress_missing_file_warning": self.suppress_missing_file_warning,
             "grid_columns": self.grid.columns,
         }
@@ -1365,7 +1385,10 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
 
     viewer = ImageViewer()
-    viewer.show()
+    if viewer.start_maximized:
+        viewer.showMaximized()
+    else:
+        viewer.show()
 
     if len(sys.argv) > 1:
         arg_path = sys.argv[1]
