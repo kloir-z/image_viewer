@@ -6,3 +6,4 @@ image_viewer.vbs
 image_viewer.bat
 config.json
 __pycache__
+.pshistory

@@ -15,9 +15,20 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QDesktopWidget,
     QInputDialog,
+    QScrollArea,
+    QFrame,
 )
-from PyQt5.QtGui import QPixmap, QImage, QPainter, QColor
-from PyQt5.QtCore import Qt, QPoint, QTimer
+from PyQt5.QtGui import QPixmap, QImage, QPainter, QColor, QPen
+from PyQt5.QtCore import (
+    Qt,
+    QPoint,
+    QTimer,
+    QRect,
+    pyqtSignal,
+    QThread,
+    QMutex,
+    QWaitCondition,
+)
 from PIL import Image, ImageFile
 from pillow_heif import register_heif_opener
 from collections import OrderedDict
@@ -115,6 +126,366 @@ class ProgressIndicator(QWidget):
             painter.end()
 
 
+class ThumbnailLoader(QThread):
+    """一覧表示用に元画像を読み込み、表示用サイズへ縮小した QImage を返すワーカー。
+    ディスクにサムネイルファイルは作らず、元画像をその場で縮小するだけ。
+    縮小結果(小さいQImage)を ThumbnailGrid 側でキャッシュし、スクロールの度に
+    元の大きな画像を読み直さないようにする。"""
+
+    thumbnailReady = pyqtSignal(str, QImage)
+    thumbnailFailed = pyqtSignal(str)
+
+    THUMB_MAX = 256  # 縮小後の最大辺(px)。セルサイズと独立にしておけば列数変更でも再生成不要。
+
+    def __init__(self, rotate_func, parent=None):
+        super().__init__(parent)
+        self._rotate = rotate_func
+        self._mutex = QMutex()
+        self._cond = QWaitCondition()
+        self._queue = []        # 読み込み待ちパス (末尾ほど優先 = 直近に要求されたもの)
+        self._requested = set()  # 重複要求の防止
+        self._running = True
+
+    def request(self, paths):
+        """表示に必要なパス群を要求する。既に要求済みのものは無視。"""
+        self._mutex.lock()
+        for p in paths:
+            if p not in self._requested:
+                self._requested.add(p)
+                self._queue.append(p)
+        self._cond.wakeAll()
+        self._mutex.unlock()
+
+    def clear(self):
+        self._mutex.lock()
+        self._queue.clear()
+        self._requested.clear()
+        self._mutex.unlock()
+
+    def stop(self):
+        self._mutex.lock()
+        self._running = False
+        self._cond.wakeAll()
+        self._mutex.unlock()
+        self.wait()
+
+    def run(self):
+        while True:
+            self._mutex.lock()
+            while self._running and not self._queue:
+                self._cond.wait(self._mutex)
+            if not self._running:
+                self._mutex.unlock()
+                return
+            path = self._queue.pop()  # LIFO: 直近に見えたセルを優先して処理
+            self._mutex.unlock()
+
+            qimg = self._generate(path)
+
+            self._mutex.lock()
+            self._requested.discard(path)
+            self._mutex.unlock()
+
+            if qimg is None:
+                self.thumbnailFailed.emit(path)
+            else:
+                self.thumbnailReady.emit(path, qimg)
+
+    def _generate(self, path):
+        if not os.path.exists(path):
+            return None
+        try:
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+            with open(path, "rb") as f:
+                image = Image.open(f)
+                try:
+                    exif = image._getexif()
+                    image = self._rotate(image, exif)
+                except AttributeError:
+                    pass
+                if image.mode != "RGB":
+                    image = image.convert("RGB")
+                image.thumbnail((self.THUMB_MAX, self.THUMB_MAX), Image.LANCZOS)
+                data = image.tobytes("raw", "RGB")
+                qimg = QImage(
+                    data,
+                    image.size[0],
+                    image.size[1],
+                    image.size[0] * 3,
+                    QImage.Format_RGB888,
+                )
+                # data は関数終了で解放されるため、独立したコピーを返す
+                return qimg.copy()
+        except Exception:
+            return None
+
+
+class ThumbnailGrid(QWidget):
+    """画像を正方セルのグリッドに並べる一覧ウィジェット。
+    列数を固定し、ウィンドウ幅に応じて各セルを拡大縮小する。
+    表示範囲のサムネイルだけを ThumbnailLoader に遅延要求する。"""
+
+    thumbnailClicked = pyqtSignal(int)
+
+    PAD = 6
+    SEP_THICKNESS = 2  # フォルダ区切り線の太さ(px)
+    BG = QColor("#2D2D2D")
+    PLACEHOLDER = QColor("#3a3a3a")
+    FAILED_COLOR = QColor("#5a3a3a")
+    HIGHLIGHT = QColor("#007bff")
+    SEP_COLOR = QColor("#6a6a6a")  # フォルダ区切り線
+
+    MIN_COLS = 2
+    MAX_COLS = 8
+
+    def __init__(self, loader, parent=None):
+        super().__init__(parent)
+        self.loader = loader
+        self.images = []
+        self.columns = 5
+        self.current_index = 0
+        self.group_by_folder = True   # フォルダの切れ目で改行するか
+        self.cache = OrderedDict()    # path -> QPixmap (LRU)
+        self.cache_cap = 600
+        self.failed = set()
+        self._index_of = {}           # path -> index (セル矩形の部分更新用)
+        self._positions = []          # index -> (row, col)
+        self._row_starts = []         # row -> その行の先頭 index
+        self._folder_start_rows = set()  # 区切り線を引く行
+        self._rows = 0
+        self.scroll_area = None
+        self.loader.thumbnailReady.connect(self._on_ready)
+        self.loader.thumbnailFailed.connect(self._on_failed)
+
+    def set_images(self, images, index, columns=None, group_by_folder=True):
+        self.images = images
+        self.current_index = index
+        self.group_by_folder = group_by_folder
+        if columns:
+            self.columns = max(self.MIN_COLS, min(columns, self.MAX_COLS))
+        self._index_of = {p: i for i, p in enumerate(images)}
+        self.failed.clear()
+        self.loader.clear()
+        self._relayout()
+        self.update()
+
+    def set_current_index(self, index):
+        self.current_index = index
+        self.update()
+
+    def set_columns(self, cols):
+        self.columns = max(self.MIN_COLS, min(cols, self.MAX_COLS))
+        self._relayout()
+        self.update()
+
+    def row_of(self, idx):
+        if 0 <= idx < len(self._positions):
+            return self._positions[idx][0]
+        return 0
+
+    def _viewport_width(self):
+        if self.scroll_area is not None:
+            return self.scroll_area.viewport().width()
+        return self.width()
+
+    def _cell_size(self):
+        return max(40, self._viewport_width() // max(1, self.columns))
+
+    def _build_layout(self):
+        """各画像の (row, col) を確定する。group_by_folder のときは
+        フォルダが変わるたびに次の行の先頭(col=0)から並べ直す。"""
+        cols = self.columns
+        positions = []
+        row_starts = []
+        folder_start_rows = set()  # 新しいフォルダが始まる行(区切り線を引く対象)
+        if not self.images:
+            self._positions = []
+            self._row_starts = []
+            self._folder_start_rows = set()
+            self._rows = 0
+            return
+
+        row = 0
+        col = 0
+        prev_dir = None
+        last_row_recorded = -1
+        for p in self.images:
+            if self.group_by_folder:
+                d = os.path.dirname(p)
+                if prev_dir is not None and d != prev_dir:
+                    row += 1
+                    col = 0
+                    folder_start_rows.add(row)  # 先頭行(row 0)以外が対象になる
+                elif col >= cols:
+                    row += 1
+                    col = 0
+                prev_dir = d
+            elif col >= cols:
+                row += 1
+                col = 0
+            if row != last_row_recorded:
+                row_starts.append(len(positions))  # この行の先頭 index
+                last_row_recorded = row
+            positions.append((row, col))
+            col += 1
+
+        self._positions = positions
+        self._row_starts = row_starts
+        self._folder_start_rows = folder_start_rows
+        self._rows = row + 1
+
+    def _relayout(self):
+        self._build_layout()
+        w = self._viewport_width()
+        cell = max(40, w // max(1, self.columns))
+        self.setFixedWidth(w)
+        self.setFixedHeight(self._rows * cell if self._rows else 1)
+
+    def _cell_rect(self, idx):
+        cell = self._cell_size()
+        row, col = self._positions[idx]
+        return QRect(col * cell, row * cell, cell, cell)
+
+    def _on_ready(self, path, qimg):
+        pm = QPixmap.fromImage(qimg)
+        self.cache[path] = pm
+        self.cache.move_to_end(path)
+        while len(self.cache) > self.cache_cap:
+            self.cache.popitem(last=False)
+        idx = self._index_of.get(path)
+        if idx is not None and idx < len(self._positions):
+            self.update(self._cell_rect(idx))
+
+    def _on_failed(self, path):
+        self.failed.add(path)
+        idx = self._index_of.get(path)
+        if idx is not None and idx < len(self._positions):
+            self.update(self._cell_rect(idx))
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        try:
+            painter.fillRect(event.rect(), self.BG)
+            n = len(self.images)
+            if n == 0 or self._rows == 0:
+                return
+            cell = self._cell_size()
+
+            # 表示中のビューポート範囲から描画対象セルを決定
+            if self.scroll_area is not None:
+                top = self.scroll_area.verticalScrollBar().value()
+                vh = self.scroll_area.viewport().height()
+            else:
+                top = event.rect().top()
+                vh = event.rect().height()
+            first_row = max(0, min(top // cell, self._rows - 1))
+            last_row = max(0, min((top + vh) // cell, self._rows - 1))
+            first_idx = self._row_starts[first_row]
+            last_idx = (
+                self._row_starts[last_row + 1] - 1
+                if last_row + 1 < len(self._row_starts)
+                else n - 1
+            )
+
+            need = []
+            for idx in range(first_idx, last_idx + 1):
+                rect = self._cell_rect(idx)
+                inner = rect.adjusted(self.PAD, self.PAD, -self.PAD, -self.PAD)
+                path = self.images[idx]
+                pm = self.cache.get(path)
+                if pm is not None:
+                    self.cache.move_to_end(path)
+                    scaled = pm.scaled(
+                        inner.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    )
+                    dx = inner.x() + (inner.width() - scaled.width()) // 2
+                    dy = inner.y() + (inner.height() - scaled.height()) // 2
+                    painter.drawPixmap(dx, dy, scaled)
+                elif path in self.failed:
+                    painter.fillRect(inner, self.FAILED_COLOR)
+                else:
+                    painter.fillRect(inner, self.PLACEHOLDER)
+                    need.append(path)
+
+                if idx == self.current_index:
+                    pen = QPen(self.HIGHLIGHT)
+                    pen.setWidth(3)
+                    painter.setPen(pen)
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawRect(rect.adjusted(2, 2, -2, -2))
+
+            # フォルダの切れ目(各フォルダ先頭行の上端)に細い区切り線を引く
+            if self.group_by_folder and self._folder_start_rows:
+                for r in self._folder_start_rows:
+                    if first_row <= r <= last_row:
+                        painter.fillRect(
+                            0, r * cell, self.width(), self.SEP_THICKNESS, self.SEP_COLOR
+                        )
+        finally:
+            painter.end()
+
+        if need:
+            self.loader.request(need)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            cell = self._cell_size()
+            col = event.x() // cell
+            row = event.y() // cell
+            if not (0 <= row < self._rows) or col >= self.columns:
+                return
+            start = self._row_starts[row]
+            end = (
+                self._row_starts[row + 1]
+                if row + 1 < len(self._row_starts)
+                else len(self.images)
+            )
+            idx = start + col
+            if idx < end:  # 行内の実セル数を超えたクリック(空白部)は無視
+                self.thumbnailClicked.emit(idx)
+
+    def wheelEvent(self, event):
+        if event.modifiers() == Qt.ControlModifier:
+            cell = self._cell_size()
+            top = (
+                self.scroll_area.verticalScrollBar().value()
+                if self.scroll_area is not None
+                else 0
+            )
+            top_idx = (top // cell) * self.columns  # 変更前に見えていた先頭セル
+            if event.angleDelta().y() > 0:
+                self.set_columns(self.columns - 1)  # 拡大 = 列を減らす
+            else:
+                self.set_columns(self.columns + 1)  # 縮小 = 列を増やす
+            if self.scroll_area is not None:
+                new_cell = self._cell_size()
+                new_row = top_idx // self.columns
+                self.scroll_area.verticalScrollBar().setValue(new_row * new_cell)
+            event.accept()
+        else:
+            event.ignore()  # 通常スクロールは QScrollArea に委ねる
+
+
+class GridScrollArea(QScrollArea):
+    """ThumbnailGrid を内包するスクロール領域。リサイズ時にグリッドを再レイアウトする。"""
+
+    def __init__(self, grid, parent=None):
+        super().__init__(parent)
+        self.grid = grid
+        grid.scroll_area = self
+        self.setWidget(grid)
+        self.setWidgetResizable(False)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # 縦スクロールバーを常時表示してビューポート幅を一定に保つ
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.grid._relayout()
+        self.grid.update()
+
+
 class ImageViewer(QWidget):
     def __init__(self):
         super().__init__()
@@ -144,6 +515,7 @@ class ImageViewer(QWidget):
         self.current_root_path = None  # ユーザーが選択した親フォルダ
         self.current_depth = 0  # 選択された階層数 (0=なし, 1-3=階層, -1=全階層)
         self.current_pickup_file = None  # 現在セッションのピックアップ保存先
+        self.sort_mode = "folder"  # "folder"=フォルダ順 / "filename"=ファイル名順 (config未保存)
 
         if os.path.exists(self.config_path):
             with open(self.config_path, "r") as f:
@@ -152,6 +524,7 @@ class ImageViewer(QWidget):
             position = config.get("position", [0, 0])
             size = config.get("size", [800, 800])
             self.suppress_missing_file_warning = config.get("suppress_missing_file_warning", False)
+            self.grid_columns = config.get("grid_columns", 5)
             # 旧フォーマットから新フォーマットへの移行
             migrated_history = {}
             for key, value in history.items():
@@ -171,6 +544,7 @@ class ImageViewer(QWidget):
             position = [0, 0]
             size = [800, 800]
             self.suppress_missing_file_warning = False
+            self.grid_columns = 5
 
         self.history = OrderedDict(history)
 
@@ -188,6 +562,22 @@ class ImageViewer(QWidget):
         self.label = ResizableLabel()
         self.layout.addWidget(self.label)
 
+        # 一覧 (グリッド) 表示
+        self.grid_mode = False
+        self.thumb_loader = ThumbnailLoader(self.rotate_image_according_to_exif)
+        self.thumb_loader.start()
+        self.grid = ThumbnailGrid(self.thumb_loader)
+        self.grid.set_columns(self.grid_columns)
+        self.grid.thumbnailClicked.connect(self.on_thumbnail_clicked)
+        self.scroll_area = GridScrollArea(self.grid)
+        self.scroll_area.hide()
+        self.layout.addWidget(self.scroll_area)
+        # グリッド側がキーボードフォーカスを奪わないようにし、左右キー等の
+        # キー入力が常にメインウィンドウ(keyPressEvent)へ届くようにする
+        self.scroll_area.setFocusPolicy(Qt.NoFocus)
+        self.grid.setFocusPolicy(Qt.NoFocus)
+        self.setFocusPolicy(Qt.StrongFocus)
+
         self.setAcceptDrops(True)
 
         self.resize(*size)
@@ -199,7 +589,10 @@ class ImageViewer(QWidget):
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
 
-        self.setStyleSheet("ImageViewer, ResizableLabel, ProgressIndicator { background-color: #2D2D2D; }")
+        self.setStyleSheet(
+            "ImageViewer, ResizableLabel, ProgressIndicator, "
+            "GridScrollArea, ThumbnailGrid { background-color: #2D2D2D; }"
+        )
 
     def ensure_position_on_screen(self, position, size):
         desktop = QDesktopWidget()
@@ -298,6 +691,8 @@ class ImageViewer(QWidget):
             self.display_pixmap()
 
     def wheelEvent(self, event):
+        if self.grid_mode:
+            return
         delta = event.angleDelta().y()
         if event.modifiers() == Qt.ControlModifier and self.images:
             self.zoom_at_position(event.pos(), delta)
@@ -325,14 +720,19 @@ class ImageViewer(QWidget):
             self.display_pixmap()
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_F:
+        if event.key() == Qt.Key_Escape:
+            if self.grid_mode:
+                self.toggle_grid_mode()
+            elif self.isFullScreen():
+                self.showNormal()
+        elif event.key() == Qt.Key_F:
             self.showFullScreen()
-        elif event.key() == Qt.Key_Escape and self.isFullScreen():
-            self.showNormal()
         elif event.key() == Qt.Key_Left:
-            self.move_index(-1)
+            if not self.grid_mode:
+                self.move_index(-1)
         elif event.key() == Qt.Key_Right:
-            self.move_index(1)
+            if not self.grid_mode:
+                self.move_index(1)
         elif event.key() == Qt.Key_F5:
             self.reload_current_dir()
 
@@ -341,9 +741,7 @@ class ImageViewer(QWidget):
             return
         self.index += delta
         self.index %= len(self.images)
-        self.zoom_factor = 1.0
-        self.pan_offset = QPoint(0, 0)
-        self.is_original_size = False
+        # ズーム/パン/原寸表示の状態は画像を移動しても維持する
         self.load_pixmap()
         self.display_pixmap()
         self.is_loading = False
@@ -486,7 +884,7 @@ class ImageViewer(QWidget):
             self.label.setPixmap(result)
 
     def resizeEvent(self, event):
-        if self.images:
+        if self.images and not self.grid_mode:
             self.display_pixmap()
         super().resizeEvent(event)
 
@@ -584,6 +982,7 @@ class ImageViewer(QWidget):
                     except PermissionError:
                         pass
 
+        self._sort_images()
         self.setup_images_and_index(dir_path, filename)
 
     def update_history(self):
@@ -608,6 +1007,103 @@ class ImageViewer(QWidget):
         if len(self.history) > 20:
             self.history.popitem(last=False)
 
+    def _sort_images(self):
+        """現在の sort_mode に従って self.images を並べ替える。
+        フォルダ順: (dirname, basename) の自然順 (構築順と等価)。
+        ファイル名順: (basename, dirname) の自然順 — 同名ファイルはフォルダ名順で並ぶ。"""
+        if not self.images:
+            return
+
+        def natural_sort_key(s):
+            return [int(text) if text.isdigit() else text for text in re.split(r"(\d+)", s)]
+
+        if self.sort_mode == "filename":
+            self.images.sort(key=lambda p: (
+                natural_sort_key(os.path.basename(p)),
+                natural_sort_key(os.path.dirname(p)),
+            ))
+        else:  # "folder"
+            self.images.sort(key=lambda p: (
+                natural_sort_key(os.path.dirname(p)),
+                natural_sort_key(os.path.basename(p)),
+            ))
+
+    def toggle_sort_mode(self):
+        """フォルダ順 / ファイル名順 を切り替える。表示中の画像はそのまま維持。"""
+        if not self.images:
+            return
+        current_image_path = self.images[self.index]
+        self.sort_mode = "filename" if self.sort_mode == "folder" else "folder"
+        self._sort_images()
+        if current_image_path in self.images:
+            self.index = self.images.index(current_image_path)
+        self.progress_bar.set_images(self.images, self.index)
+        if self.grid_mode:
+            self.grid.set_images(
+                self.images,
+                self.index,
+                self.grid_columns,
+                group_by_folder=(self.sort_mode == "folder"),
+            )
+            QTimer.singleShot(0, self._scroll_grid_to_current)
+        else:
+            self.load_pixmap()
+            self.display_pixmap()
+
+    def toggle_grid_mode(self):
+        """一覧 (グリッド) 表示 と 1枚表示 を切り替える。"""
+        if not self.images and not self.grid_mode:
+            return
+        self.grid_mode = not self.grid_mode
+        if self.grid_mode:
+            self.label.hide()
+            self.progress_bar.hide()
+            self.grid.set_images(
+                self.images,
+                self.index,
+                self.grid_columns,
+                group_by_folder=(self.sort_mode == "folder"),
+            )
+            self.scroll_area.show()
+            self.setWindowTitle(f"一覧表示 - {len(self.images)}枚")
+            # レイアウト確定後に現在の画像までスクロール
+            QTimer.singleShot(0, self._scroll_grid_to_current)
+        else:
+            self.scroll_area.hide()
+            self.progress_bar.show()
+            self.label.show()
+            self.setFocus()
+            if self.images:
+                self.load_pixmap()
+                self.display_pixmap()
+
+    def _scroll_grid_to_current(self):
+        if not self.images:
+            return
+        cell = self.grid._cell_size()
+        row = self.grid.row_of(self.index)
+        vh = self.scroll_area.viewport().height()
+        y = max(0, row * cell - (vh - cell) // 2)
+        self.scroll_area.verticalScrollBar().setValue(y)
+        self.grid.update()
+
+    def on_thumbnail_clicked(self, idx):
+        """一覧でサムネイルをクリック: その画像を1枚表示で開く。"""
+        if not (0 <= idx < len(self.images)):
+            return
+        self.index = idx
+        self.zoom_factor = 1.0
+        self.pan_offset = QPoint(0, 0)
+        self.is_original_size = False
+        self.grid_mode = False
+        self.scroll_area.hide()
+        self.progress_bar.show()
+        self.label.show()
+        self.setFocus()
+        self.progress_bar.set_index(self.index)
+        self.load_pixmap()
+        self.display_pixmap()
+
     def setup_images_and_index(self, dir_path, filename=None, last_image_path=None):
         if self.images:
             self.index = 0  # デフォルト
@@ -631,6 +1127,14 @@ class ImageViewer(QWidget):
             self.progress_bar.set_images(self.images, self.index)
             self.load_pixmap()
             self.display_pixmap()
+            if self.grid_mode:
+                self.grid.set_images(
+                self.images,
+                self.index,
+                self.grid_columns,
+                group_by_folder=(self.sort_mode == "folder"),
+            )
+                QTimer.singleShot(0, self._scroll_grid_to_current)
 
     def load_from_history(self, root_path, history_entry):
         """履歴エントリから画像を読み込む"""
@@ -674,9 +1178,19 @@ class ImageViewer(QWidget):
         if self.images:
             current_dir = os.path.normpath(os.path.dirname(self.images[self.index]))
 
+            grid_label = "1枚表示に戻る" if self.grid_mode else "一覧表示"
+            grid_action = QAction(grid_label, self)
+            grid_action.triggered.connect(self.toggle_grid_mode)
+            context_menu.addAction(grid_action)
+
             reload_action = QAction("再読み込み (F5)", self)
             reload_action.triggered.connect(self.reload_current_dir)
             context_menu.addAction(reload_action)
+
+            sort_label = "ファイル名順で並べ替え" if self.sort_mode == "folder" else "フォルダ順に戻す"
+            sort_action = QAction(sort_label, self)
+            sort_action.triggered.connect(self.toggle_sort_mode)
+            context_menu.addAction(sort_action)
 
             pickup_action = QAction("ファイル名の記録", self)
             pickup_action.triggered.connect(self.pickup_current_image)
@@ -757,6 +1271,7 @@ class ImageViewer(QWidget):
 
         old_count = len(self.images)
         self.images = new_images
+        self._sort_images()
         new_count = len(self.images)
 
         if not self.images:
@@ -779,6 +1294,14 @@ class ImageViewer(QWidget):
             self.progress_bar.set_images(self.images, self.index)
             self.load_pixmap()
             self.display_pixmap()
+
+        if self.grid_mode:
+            self.grid.set_images(
+                self.images,
+                self.index,
+                self.grid_columns,
+                group_by_folder=(self.sort_mode == "folder"),
+            )
 
         diff = new_count - old_count
         if diff > 0:
@@ -825,11 +1348,13 @@ class ImageViewer(QWidget):
     def closeEvent(self, event):
         if self.images:
             self.update_history()
+        self.thumb_loader.stop()
         config = {
             "history": self.history,
             "position": [self.x(), self.y()],
             "size": [self.width(), self.height()],
             "suppress_missing_file_warning": self.suppress_missing_file_warning,
+            "grid_columns": self.grid.columns,
         }
         with open(self.config_path, "w") as f:
             json.dump(config, f)

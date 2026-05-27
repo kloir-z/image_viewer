@@ -38,10 +38,25 @@ The entire application is in [image_viewer.py](image_viewer.py):
   - Full screen toggle (F key, Escape to exit)
   - Ctrl+wheel zoom centered at cursor, drag to pan, double-click to reset, triple-click to toggle 1:1 original size
   - F5 reload: re-scan the current directory tree, preserving the displayed image when possible
-  - Context menu (right-click) with directory history, reload, pickup-file recording, and "open in explorer"
-  - Saves window position, size, history, and warning-suppression flag to `config.json` on close
+  - Context menu (right-click) with directory history, grid/single-view toggle, reload, sort toggle, pickup-file recording, and "open in explorer"
+  - Grid (thumbnail) view: toggled from the context menu ("一覧表示" / "1枚表示に戻る"); click a thumbnail to open it in single view, Escape to return
+  - Saves window position, size, history, warning-suppression flag, and grid column count to `config.json` on close
 
 - **ResizableLabel** (QLabel): custom label that maintains center alignment with ignored size policy (lets the parent freely resize without the label fighting back)
+
+- **ThumbnailLoader** (QThread): background worker for the grid view
+  - Loads each *original* image and downscales it in memory (no thumbnail files are written to disk); max long edge = `THUMB_MAX` (256px), independent of cell size so column changes need no regeneration
+  - Reuses `ImageViewer.rotate_image_according_to_exif` for EXIF orientation
+  - LIFO queue (newest-requested processed first) so the currently-visible cells take priority; `request()` dedups via a `_requested` set, `clear()` empties the queue, `stop()` joins the thread on close
+  - Emits `thumbnailReady(path, QImage)` / `thumbnailFailed(path)`; QImage is `.copy()`d so it survives the source buffer going out of scope (QPixmap conversion happens on the GUI thread in `ThumbnailGrid._on_ready`)
+
+- **ThumbnailGrid** (QWidget): square-cell grid drawn via `paintEvent`, inside a `GridScrollArea` (QScrollArea)
+  - Fixed column count (default 5, clamped to `MIN_COLS`..`MAX_COLS` = 2–8, persisted as `grid_columns`); cell size = viewport width / columns, so cells scale with the window
+  - Ctrl+wheel changes the column count; non-Ctrl wheel is ignored so the scroll area scrolls. Anchors the top-visible item across column changes
+  - **Folder grouping**: when `group_by_folder` is on (set by `ImageViewer` only in folder-sort mode), each folder starts on a new row and a thin separator line (`SEP_COLOR`, `SEP_THICKNESS`) is drawn along the top edge of each folder's first row so subfolder boundaries are visible. `_build_layout()` precomputes `_positions` (index→(row,col)), `_row_starts` (row→first index), `_folder_start_rows` (rows that begin a new folder), and `_rows`; paint/click/scroll all go through these instead of `idx // columns`. In filename-sort mode grouping is off and the grid is a plain sequential flow with no separators
+  - Lazy loading: each `paintEvent` enqueues only the thumbnails for the currently-visible viewport rows; arrivals repaint just their own cell rect (`_index_of` maps path→index)
+  - LRU pixmap cache (`cache_cap` = 600) so scrolling back doesn't re-read large files; failed paths are remembered to avoid retry
+  - Current image is highlighted with a blue border; left-click emits `thumbnailClicked(index)`
 
 - **ProgressIndicator** (QWidget): custom progress bar drawn via `paintEvent`
   - 1 image = 1 segment for precise position display (regardless of total count)
@@ -79,3 +94,4 @@ The entire application is in [image_viewer.py](image_viewer.py):
 - `position`: window `[x, y]` coordinates
 - `size`: window `[width, height]`
 - `suppress_missing_file_warning`: bool, true once the user checks "don't show again"
+- `grid_columns`: int, number of columns in the thumbnail grid view (default 5, range 2–8)
