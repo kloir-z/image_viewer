@@ -17,6 +17,8 @@ from PyQt5.QtWidgets import (
     QInputDialog,
     QScrollArea,
     QFrame,
+    QPlainTextEdit,
+    QFileDialog,
 )
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QColor, QPen
 from PyQt5.QtCore import (
@@ -35,6 +37,7 @@ from collections import OrderedDict
 
 register_heif_opener()
 import subprocess
+from send2trash import send2trash
 
 
 class ResizableLabel(QLabel):
@@ -520,6 +523,52 @@ class GridScrollArea(QScrollArea):
         self.grid.update()
 
 
+class JsonOverlay(QWidget):
+    """画像に対応する JSON の内容を半透明オーバーレイで表示する。
+    テキスト領域外のクリック、または Escape で閉じる。親(ImageViewer)の
+    子ウィジェットとして全面を覆い、リサイズ時に追従する。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.hide()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(48, 48, 48, 48)
+        self.title_label = QLabel(self)
+        self.title_label.setStyleSheet(
+            "QLabel { color: #e0e0e0; font-size: 13px; font-weight: bold;"
+            " padding: 2px 4px; }"
+        )
+        layout.addWidget(self.title_label)
+        self.text = QPlainTextEdit(self)
+        self.text.setReadOnly(True)
+        self.text.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.text.setStyleSheet(
+            "QPlainTextEdit { background-color: #1e1e1e; color: #e6e6e6;"
+            " border: 1px solid #555; border-radius: 6px; padding: 8px;"
+            " font-family: 'Consolas','Courier New',monospace; font-size: 12px; }"
+        )
+        layout.addWidget(self.text)
+
+    def show_content(self, title, content):
+        self.title_label.setText(title)
+        self.text.setPlainText(content)
+        parent = self.parent()
+        if parent is not None:
+            self.setGeometry(parent.rect())
+        self.show()
+        self.raise_()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 190))
+        painter.end()
+
+    def mousePressEvent(self, event):
+        # テキスト領域外のクリックで閉じる
+        if not self.text.geometry().contains(event.pos()):
+            self.hide()
+
+
 class ImageViewer(QWidget):
     def __init__(self):
         super().__init__()
@@ -562,6 +611,7 @@ class ImageViewer(QWidget):
             self.suppress_missing_file_warning = config.get("suppress_missing_file_warning", False)
             self.grid_columns = config.get("grid_columns", 5)
             self.start_maximized = config.get("maximized", False)
+            self.excluded_seed_file = config.get("excluded_seed_file", None)
             # 旧フォーマットから新フォーマットへの移行
             migrated_history = {}
             for key, value in history.items():
@@ -583,6 +633,7 @@ class ImageViewer(QWidget):
             self.suppress_missing_file_warning = False
             self.grid_columns = 5
             self.start_maximized = False
+            self.excluded_seed_file = None
 
         self.history = OrderedDict(history)
 
@@ -615,6 +666,9 @@ class ImageViewer(QWidget):
         self.scroll_area.setFocusPolicy(Qt.NoFocus)
         self.grid.setFocusPolicy(Qt.NoFocus)
         self.setFocusPolicy(Qt.StrongFocus)
+
+        # 対応 JSON を表示するオーバーレイ
+        self.json_overlay = JsonOverlay(self)
 
         self.setAcceptDrops(True)
 
@@ -765,10 +819,14 @@ class ImageViewer(QWidget):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
-            if self.grid_mode:
-                self.toggle_grid_mode()
+            if self.json_overlay.isVisible():
+                self.json_overlay.hide()
+            elif self.grid_mode:
+                self.toggle_grid_mode()       # 一覧 → 1枚表示
             elif self.isFullScreen():
                 self.showNormal()
+            elif self.images:
+                self.toggle_grid_mode()       # 1枚表示 → 一覧
         elif event.key() == Qt.Key_F:
             self.showFullScreen()
         elif event.key() == Qt.Key_Left:
@@ -945,6 +1003,8 @@ class ImageViewer(QWidget):
     def resizeEvent(self, event):
         if self.images and not self.grid_mode:
             self.display_pixmap()
+        if self.json_overlay.isVisible():
+            self.json_overlay.setGeometry(self.rect())
         self._remember_normal_geometry()
         super().resizeEvent(event)
 
@@ -1357,6 +1417,27 @@ class ImageViewer(QWidget):
             pickup_action.triggered.connect(self.pickup_current_image)
             context_menu.addAction(pickup_action)
 
+            context_menu.addSeparator()
+
+            json_action = QAction("JSONを表示", self)
+            json_action.triggered.connect(self.show_json_overlay)
+            context_menu.addAction(json_action)
+
+            delete_action = QAction("画像とJSONを削除しseedを除外", self)
+            delete_action.triggered.connect(self.delete_and_exclude_current)
+            context_menu.addAction(delete_action)
+
+            seed_file_label = (
+                f"除外seedファイルを変更... ({os.path.basename(self.excluded_seed_file)})"
+                if self.excluded_seed_file
+                else "除外seedファイルを設定..."
+            )
+            seed_file_action = QAction(seed_file_label, self)
+            seed_file_action.triggered.connect(self.change_excluded_seed_file)
+            context_menu.addAction(seed_file_action)
+
+            context_menu.addSeparator()
+
             open_in_explorer_action = QAction("###Open current dir in explorer###", self)
             open_in_explorer_action.triggered.connect(lambda: self.open_in_explorer(current_dir))
             context_menu.addAction(open_in_explorer_action)
@@ -1505,6 +1586,119 @@ class ImageViewer(QWidget):
             return [self._seed_of(p) or "" for p in self.images]
         return [os.path.dirname(p) for p in self.images]
 
+    def show_json_overlay(self):
+        """現在の画像に対応する JSON をオーバーレイ表示する。"""
+        if not self.images:
+            return
+        image_path = self.images[self.index]
+        json_path, _ = self._parse_image_meta(image_path)
+        if not os.path.exists(json_path):
+            QMessageBox.information(
+                self, "JSONなし", f"対応するJSONが見つかりません:\n{json_path}"
+            )
+            return
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                raw = f.read()
+        except OSError as e:
+            QMessageBox.warning(self, "読み込み失敗", f"JSONの読み込みに失敗しました:\n{e}")
+            return
+        # 整形して見やすく (パース失敗時は生テキスト)
+        try:
+            content = json.dumps(json.loads(raw), ensure_ascii=False, indent=2)
+        except (ValueError, TypeError):
+            content = raw
+        self.json_overlay.show_content(os.path.basename(json_path), content)
+
+    def _ensure_excluded_seed_file(self):
+        """除外 seed ファイルが未指定なら選択ダイアログで指定し記憶する。
+        戻り値: 使用可能か (キャンセル時 False)。"""
+        if self.excluded_seed_file:
+            return True
+        return self.change_excluded_seed_file()
+
+    def change_excluded_seed_file(self):
+        """除外 seed ファイルの保存先を選択する (新規作成可・追記運用)。"""
+        start_dir = self.current_root_path or ""
+        default = self.excluded_seed_file or os.path.join(start_dir, "excluded_seeds.txt")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "除外seedファイルを選択 (新規作成可)",
+            default,
+            "テキストファイル (*.txt);;すべてのファイル (*.*)",
+            options=QFileDialog.DontConfirmOverwrite,  # 既存ファイルへ追記するため上書き確認は不要
+        )
+        if not path:
+            return False
+        self.excluded_seed_file = os.path.normpath(path)
+        return True
+
+    def delete_and_exclude_current(self):
+        """現在の画像と対応 JSON をゴミ箱へ送り、seed を除外リストに追記する。"""
+        if not self.images:
+            return
+        image_path = self.images[self.index]
+        json_path, seed = self._parse_image_meta(image_path)
+
+        # seed を除外リストへ追記 (seed が取れた場合のみ)
+        if seed is not None:
+            if not self._ensure_excluded_seed_file():
+                return  # ファイル未指定でキャンセルされた場合は何もしない
+            try:
+                with open(self.excluded_seed_file, "a", encoding="utf-8") as f:
+                    f.write(seed + "\n")
+            except OSError as e:
+                QMessageBox.warning(
+                    self, "追記失敗", f"除外seedファイルへの書き込みに失敗しました:\n{e}"
+                )
+                return
+
+        # 画像と JSON をゴミ箱へ送る
+        errors = []
+        for p in (image_path, json_path):
+            if os.path.exists(p):
+                try:
+                    send2trash(os.path.normpath(p))
+                except Exception as e:
+                    errors.append(f"{os.path.basename(p)}: {e}")
+        if errors:
+            QMessageBox.warning(
+                self, "削除失敗", "ゴミ箱への移動に失敗しました:\n" + "\n".join(errors)
+            )
+
+        # 一覧/表示から取り除き次の画像へ
+        self._remove_image_from_list(image_path)
+
+    def _remove_image_from_list(self, image_path):
+        """画像をリストから除去し、表示を次の画像へ更新する。"""
+        if image_path in self.images:
+            self.images.remove(image_path)
+
+        if not self.images:
+            self.label.clear()
+            self.setWindowTitle("No images loaded")
+            self.progress_bar.clear()
+            if self.grid_mode:
+                self.grid.set_images(
+                    [], 0, self.grid.columns,
+                    group_keys=self._grid_group_keys(),
+                )
+            return
+
+        if self.index >= len(self.images):
+            self.index = len(self.images) - 1
+
+        self.progress_bar.set_images(self.images, self.index, self._progress_group_keys())
+        if self.grid_mode:
+            self.grid.set_images(
+                self.images, self.index, self.grid.columns,
+                group_keys=self._grid_group_keys(),
+            )
+            QTimer.singleShot(0, self._scroll_grid_to_current)
+        else:
+            self.load_pixmap()
+            self.display_pixmap()
+
     def open_in_explorer(self, path):
         if sys.platform == "win32":
             subprocess.Popen(["explorer", os.path.normpath(path)])
@@ -1524,6 +1718,7 @@ class ImageViewer(QWidget):
             "maximized": self.isMaximized(),
             "suppress_missing_file_warning": self.suppress_missing_file_warning,
             "grid_columns": self.grid.columns,
+            "excluded_seed_file": self.excluded_seed_file,
         }
         with open(self.config_path, "w") as f:
             json.dump(config, f)

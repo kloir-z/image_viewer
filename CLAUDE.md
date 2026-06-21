@@ -36,12 +36,18 @@ The entire application is in [image_viewer.py](image_viewer.py):
   - Command-line file/directory argument support (so `open.bat` can pass the clicked file). **Multiple paths are accepted** (`sys.argv[1:]`), so selecting several folders in Explorer and using "送る"/Send To opens them all together — the SendTo target forwards every selected item to one invocation and `open.bat %*` passes them through. All paths are funneled into `load_images_from_dirs()`. The arg is loaded synchronously after `show()`; the subfolder-depth `QInputDialog` it may raise is safe because `display_pixmap()` no-ops while `self.pixmap` is `None` (the dialog's nested event loop can deliver a `resizeEvent` before the first image is loaded — `self.images` is already populated but `self.pixmap` is not yet)
   - **Multi-folder input** (`load_images_from_dirs`): takes a list of folders, asks the subfolder-depth `QInputDialog` **once** and applies that depth to every folder, then concatenates each folder's images (via the shared `_collect_dir_images`) into one list. Delegates to `load_images_from_dir` when only one valid folder remains after dedup. `self.current_roots` holds the actually-loaded folders (always `[current_root_path]` in the single-folder case); `self.current_root_path` becomes the folders' `os.path.commonpath` (falling back to the first folder across drives) and serves as the base for pickup relative paths. History records each selected folder as its own entry; F5 re-scans all of `current_roots`
   - Image navigation via keyboard (Left/Right), mouse clicks (left 25% / right 75%), mouse wheel, or progress bar
-  - Full screen toggle (F key, Escape to exit)
+  - Full screen toggle (F key). Escape priority: close JSON overlay → leave grid view → exit fullscreen → (in windowed single view) enter grid view. So in single view Escape opens the grid, and in grid view Escape returns to single — Escape toggles the two
   - Ctrl+wheel zoom centered at cursor, drag to pan, double-click to reset, triple-click to toggle 1:1 original size
   - F5 reload: re-scan the current directory tree, preserving the displayed image when possible
-  - Context menu (right-click) with directory history, grid/single-view toggle, reload, sort toggle, pickup-file recording, and "open in explorer"
-  - Grid (thumbnail) view: toggled from the context menu ("一覧表示" / "1枚表示に戻る"); click a thumbnail to open it in single view, Escape to return
-  - Saves window position, size, history, warning-suppression flag, and grid column count to `config.json` on close
+  - Context menu (right-click) with directory history, grid/single-view toggle, reload, a "並べ替え" submenu (フォルダ順 / ファイル名順 / seed順, checkable, calls `set_sort_mode`), pickup-file recording, JSON overlay display, image+JSON deletion with seed exclusion, and "open in explorer"
+  - Grid (thumbnail) view: toggled from the context menu ("一覧表示" / "1枚表示に戻る") or Escape; click a thumbnail to open it in single view, Escape to return
+  - JSON sidecar handling (`_parse_image_meta`): maps an image to its companion JSON and seed by the filename's `_seed` token. `0001_seed405730226.png` → JSON `0001.json` (the part before `_seed`) and seed `405730226` (the digits after `_seed`). With no `_seed` token, the JSON is the image basename with a `.json` extension and the seed is `None`.
+    - **"JSONを表示"** (`show_json_overlay`): reads the companion JSON, pretty-prints it (falls back to raw text on parse failure), and shows it in a `JsonOverlay`
+    - **"画像とJSONを削除しseedを除外"** (`delete_and_exclude_current`): appends the seed (one per line) to the excluded-seed file, sends the image and its JSON to the Recycle Bin (`send2trash`), then advances to the next image via `_remove_image_from_list`. No confirmation dialog. If the seed file is unset, a save-file dialog prompts for it once and persists the choice.
+    - The excluded-seed file path is chosen via `change_excluded_seed_file` (a save dialog with overwrite-confirmation disabled, since the file is appended to) and persisted as `excluded_seed_file` in `config.json`
+  - Saves window position, size, history, warning-suppression flag, grid column count, and excluded-seed file path to `config.json` on close
+
+- **JsonOverlay** (QWidget): semi-transparent full-window overlay (child of `ImageViewer`) showing a JSON sidecar's content in a read-only monospace `QPlainTextEdit`. Dismissed by clicking outside the text area or pressing Escape; follows the window on resize.
 
 - **ResizableLabel** (QLabel): custom label that maintains center alignment with ignored size policy (lets the parent freely resize without the label fighting back)
 
@@ -94,9 +100,10 @@ The entire application is in [image_viewer.py](image_viewer.py):
 - `history`: `OrderedDict` of `root_path → { root_path, depth, last_image_path }`
   - `depth`: `0` = no subfolders, `1`/`2`/`3` = N levels, `-1` = all levels
   - Old `{ root_path: filename }` format is auto-migrated on load
+  - When several folders are loaded together, each is recorded as its own entry (sharing the one chosen depth); `last_image_path` is the displayed image for the folder it belongs to, otherwise that folder's first image
 - `position`: window `[x, y]` coordinates (the *normal*, non-maximized geometry; maximized/fullscreen geometry is never saved here to avoid the window drifting on each open)
 - `size`: window `[width, height]` (normal geometry, as above)
 - `maximized`: bool, true if the window was maximized at close; restored via `showMaximized()` on next launch
 - `suppress_missing_file_warning`: bool, true once the user checks "don't show again"
 - `grid_columns`: int, number of columns in the thumbnail grid view (default 5, range 2–8)
-  - When several folders are loaded together, each is recorded as its own entry (sharing the one chosen depth); `last_image_path` is the displayed image for the folder it belongs to, otherwise that folder's first image
+- `excluded_seed_file`: str or null, the path of the file that excluded seeds are appended to (one per line) when deleting an image+JSON via the context menu. Set once via a save-file dialog and reused; changeable from the context menu
