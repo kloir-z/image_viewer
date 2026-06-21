@@ -52,25 +52,26 @@ The entire application is in [image_viewer.py](image_viewer.py):
   - Emits `thumbnailReady(path, QImage)` / `thumbnailFailed(path)`; QImage is `.copy()`d so it survives the source buffer going out of scope (QPixmap conversion happens on the GUI thread in `ThumbnailGrid._on_ready`)
 
 - **ThumbnailGrid** (QWidget): square-cell grid drawn via `paintEvent`, inside a `GridScrollArea` (QScrollArea)
-  - Fixed column count (default 5, clamped to `MIN_COLS`..`MAX_COLS` = 2–8, persisted as `grid_columns`); cell size = viewport width / columns, so cells scale with the window
+  - Column count is the live source of truth on `self.columns` (default 5, clamped to `MIN_COLS`..`MAX_COLS` = 2–8). Initialized from `grid_columns` in config and persisted back from `grid.columns` on close, so a column change made in one grid session survives leaving and re-entering the grid. Cell size = viewport width / columns, so cells scale with the window
   - Ctrl+wheel changes the column count; non-Ctrl wheel is ignored so the scroll area scrolls. Anchors the top-visible item across column changes
-  - **Folder grouping**: when `group_by_folder` is on (set by `ImageViewer` only in folder-sort mode), each folder starts on a new row and a thin separator line (`SEP_COLOR`, `SEP_THICKNESS`) is drawn along the top edge of each folder's first row so subfolder boundaries are visible. `_build_layout()` precomputes `_positions` (index→(row,col)), `_row_starts` (row→first index), `_folder_start_rows` (rows that begin a new folder), and `_rows`; paint/click/scroll all go through these instead of `idx // columns`. In filename-sort mode grouping is off and the grid is a plain sequential flow with no separators
+  - **Grouping**: `set_images(..., group_keys=...)` takes a per-image key list (or `None`). Adjacent images whose key differs start a new group: the new group begins on a fresh row and a thin separator line (`SEP_COLOR`, `SEP_THICKNESS`) is drawn along the top edge of its first row. `ImageViewer._grid_group_keys()` supplies the keys per sort mode — `dirname` in folder-sort, the seed string in seed-sort, and `None` (plain sequential flow, no separators) in filename-sort. `_build_layout()` precomputes `_positions` (index→(row,col)), `_row_starts` (row→first index), `_group_start_rows` (rows that begin a new group), and `_rows`; paint/click/scroll all go through these instead of `idx // columns`
   - Lazy loading: each `paintEvent` enqueues only the thumbnails for the currently-visible viewport rows; arrivals repaint just their own cell rect (`_index_of` maps path→index)
   - LRU pixmap cache (`cache_cap` = 600) so scrolling back doesn't re-read large files; failed paths are remembered to avoid retry
-  - Current image is highlighted with a blue border; left-click emits `thumbnailClicked(index)`
+  - Current image is highlighted with a blue border. Clicking: `mousePressEvent` records the pressed cell index (`_index_at`), and `mouseReleaseEvent` emits `thumbnailClicked(index)` only if the release lands on the same cell. Both events are consumed (`event.accept()`) — emitting on *release* (not press) and consuming the release prevents the click from leaking to the main window: switching to single view during the press would otherwise drop the implicit mouse grab and deliver the release to `ImageViewer`, mis-firing left/right-click navigation and opening a neighboring image
 
 - **ProgressIndicator** (QWidget): custom progress bar drawn via `paintEvent`
   - 1 image = 1 segment for precise position display (regardless of total count)
-  - Folders are colored in two alternating shades so subfolder boundaries are visible
+  - Runs are colored in two alternating shades so boundaries are visible. The run key comes from `set_images(..., group_keys=...)` (supplied by `ImageViewer._progress_group_keys()` — seed in seed-sort, otherwise `dirname`); when `group_keys` is `None` it falls back to `dirname`
   - Done vs. pending portions are differentiated by alpha
-  - Folder runs are precomputed in `_compute_folder_runs()` (list of `(start_idx, end_idx, parity)`) so each repaint is O(folders) not O(images)
+  - Runs are precomputed in `_compute_folder_runs()` (list of `(start_idx, end_idx, parity)`) so each repaint is O(runs) not O(images)
   - Click/drag on the bar jumps to the corresponding image (handler functions remain on `ImageViewer`)
 
 ## Key Behaviors
 
 - **Natural sorting**: files sorted numerically (1, 2, 10 vs 1, 10, 2) using `re.split(r"(\d+)", s)` — applied to both files and subfolder names
-- **Subfolder loading**: on drop, if the directory contains subfolders, prompts via `QInputDialog` for "読み込まない / 1階層 / 2階層 / 3階層 / 全階層". The chosen depth is stored on the history entry so re-opening from history skips the dialog.
-- **F5 reload**: walks the same root + depth, replaces the image list, and re-locates the currently displayed image. Falls back to the nearest neighbor if the current image was deleted.
+- **Sort modes** (`sort_mode`, set via the "並べ替え" submenu, not persisted): `folder` (by `(dirname, basename)`), `filename` (by `(basename, dirname)`), `seed` (by `(seed-int, dirname, basename)`; images with no `_seed` token sort last). `_sort_images()` re-sorts the in-memory list, preserving the currently displayed image. Folder and seed modes drive grid/progress-bar grouping (see `_grid_group_keys` / `_progress_group_keys`)
+- **Subfolder loading**: on drop, if the directory contains subfolders, prompts via `QInputDialog` for "読み込まない / 1階層 / 2階層 / 3階層 / 全階層", defaulting to "全階層". The chosen depth is stored on the history entry so re-opening from history skips the dialog.
+- **F5 reload**: re-walks every folder in `current_roots` with the same depth, replaces the image list, and re-locates the currently displayed image. Falls back to the nearest neighbor if the current image was deleted.
 - **EXIF rotation**: auto-rotates images based on EXIF Orientation tag (values 2-8 supported)
 - **Missing file handling**: shows a "ファイルが見つかりません" warning with a "再度このメッセージを表示しない" checkbox; the suppression flag is persisted to `config.json`. Missing entries are dropped from the in-memory list.
 - **Pickup file**: "ファイル名の記録" appends the current image's path (relative to `current_root_path`) to a per-session `imageviewer_pickup_YYYYMMDD_HHMMSS.txt` in the root directory. The filename is generated once on first use within a session and reused until the user opens a different folder.

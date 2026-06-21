@@ -57,11 +57,13 @@ class ProgressIndicator(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.images = []
         self.index = 0
+        self.group_keys = None  # 色替えの基準キー(list)。None ならフォルダで区切る
         self.folder_runs = []  # [(start_idx, end_idx_inclusive, parity), ...]
 
-    def set_images(self, images, index=0):
+    def set_images(self, images, index=0, group_keys=None):
         self.images = images
         self.index = index
+        self.group_keys = group_keys
         self._compute_folder_runs()
         self.update()
 
@@ -73,6 +75,7 @@ class ProgressIndicator(QWidget):
     def clear(self):
         self.images = []
         self.index = 0
+        self.group_keys = None
         self.folder_runs = []
         self.update()
 
@@ -80,16 +83,18 @@ class ProgressIndicator(QWidget):
         self.folder_runs = []
         if not self.images:
             return
+        keys = self.group_keys
+        if keys is None:
+            keys = [os.path.dirname(p) for p in self.images]
         parity = 0
         start = 0
-        prev_dir = os.path.dirname(self.images[0])
+        prev = keys[0]
         for i in range(1, len(self.images)):
-            d = os.path.dirname(self.images[i])
-            if d != prev_dir:
+            if keys[i] != prev:
                 self.folder_runs.append((start, i - 1, parity))
                 parity = 1 - parity
                 start = i
-                prev_dir = d
+                prev = keys[i]
         self.folder_runs.append((start, len(self.images) - 1, parity))
 
     def paintEvent(self, event):
@@ -244,23 +249,26 @@ class ThumbnailGrid(QWidget):
         self.images = []
         self.columns = 5
         self.current_index = 0
-        self.group_by_folder = True   # フォルダの切れ目で改行するか
+        self.group_keys = None        # 各画像のグループ化キー(list) / None=区切りなし
         self.cache = OrderedDict()    # path -> QPixmap (LRU)
         self.cache_cap = 600
         self.failed = set()
         self._index_of = {}           # path -> index (セル矩形の部分更新用)
         self._positions = []          # index -> (row, col)
         self._row_starts = []         # row -> その行の先頭 index
-        self._folder_start_rows = set()  # 区切り線を引く行
+        self._group_start_rows = set()  # 区切り線を引く行 (グループ先頭行)
         self._rows = 0
+        self._press_idx = None        # 押下時のセル index (解放時に同一なら発火)
         self.scroll_area = None
         self.loader.thumbnailReady.connect(self._on_ready)
         self.loader.thumbnailFailed.connect(self._on_failed)
 
-    def set_images(self, images, index, columns=None, group_by_folder=True):
+    def set_images(self, images, index, columns=None, group_keys=None):
         self.images = images
         self.current_index = index
-        self.group_by_folder = group_by_folder
+        # group_keys: 画像と同じ長さのキー列。隣り合うキーが変わる所でグループ
+        # (= 改行 + 区切り線) を作る。None なら区切りなしの連続フロー。
+        self.group_keys = group_keys
         if columns:
             self.columns = max(self.MIN_COLS, min(columns, self.MAX_COLS))
         self._index_of = {p: i for i, p in enumerate(images)}
@@ -292,34 +300,35 @@ class ThumbnailGrid(QWidget):
         return max(40, self._viewport_width() // max(1, self.columns))
 
     def _build_layout(self):
-        """各画像の (row, col) を確定する。group_by_folder のときは
-        フォルダが変わるたびに次の行の先頭(col=0)から並べ直す。"""
+        """各画像の (row, col) を確定する。group_keys があるときは
+        キーが変わるたびに次の行の先頭(col=0)から並べ直す。"""
         cols = self.columns
+        keys = self.group_keys
         positions = []
         row_starts = []
-        folder_start_rows = set()  # 新しいフォルダが始まる行(区切り線を引く対象)
+        group_start_rows = set()  # 新しいグループが始まる行(区切り線を引く対象)
         if not self.images:
             self._positions = []
             self._row_starts = []
-            self._folder_start_rows = set()
+            self._group_start_rows = set()
             self._rows = 0
             return
 
         row = 0
         col = 0
-        prev_dir = None
+        prev_key = None
         last_row_recorded = -1
-        for p in self.images:
-            if self.group_by_folder:
-                d = os.path.dirname(p)
-                if prev_dir is not None and d != prev_dir:
+        for i in range(len(self.images)):
+            if keys is not None:
+                k = keys[i]
+                if prev_key is not None and k != prev_key:
                     row += 1
                     col = 0
-                    folder_start_rows.add(row)  # 先頭行(row 0)以外が対象になる
+                    group_start_rows.add(row)  # 先頭行(row 0)以外が対象になる
                 elif col >= cols:
                     row += 1
                     col = 0
-                prev_dir = d
+                prev_key = k
             elif col >= cols:
                 row += 1
                 col = 0
@@ -331,7 +340,7 @@ class ThumbnailGrid(QWidget):
 
         self._positions = positions
         self._row_starts = row_starts
-        self._folder_start_rows = folder_start_rows
+        self._group_start_rows = group_start_rows
         self._rows = row + 1
 
     def _relayout(self):
@@ -414,9 +423,9 @@ class ThumbnailGrid(QWidget):
                     painter.setBrush(Qt.NoBrush)
                     painter.drawRect(rect.adjusted(2, 2, -2, -2))
 
-            # フォルダの切れ目(各フォルダ先頭行の上端)に細い区切り線を引く
-            if self.group_by_folder and self._folder_start_rows:
-                for r in self._folder_start_rows:
+            # グループの切れ目(各グループ先頭行の上端)に細い区切り線を引く
+            if self.group_keys is not None and self._group_start_rows:
+                for r in self._group_start_rows:
                     if first_row <= r <= last_row:
                         painter.fillRect(
                             0, r * cell, self.width(), self.SEP_THICKNESS, self.SEP_COLOR
@@ -427,22 +436,47 @@ class ThumbnailGrid(QWidget):
         if need:
             self.loader.request(need)
 
+    def _index_at(self, pos):
+        """ウィジェット座標からセル index を返す。空白部は None。"""
+        if self._rows == 0:
+            return None
+        cell = self._cell_size()
+        col = pos.x() // cell
+        row = pos.y() // cell
+        if not (0 <= row < self._rows) or col < 0 or col >= self.columns:
+            return None
+        start = self._row_starts[row]
+        end = (
+            self._row_starts[row + 1]
+            if row + 1 < len(self._row_starts)
+            else len(self.images)
+        )
+        idx = start + col
+        if idx < end:  # 行内の実セル数を超えたクリック(空白部)は無視
+            return idx
+        return None
+
     def mousePressEvent(self, event):
+        # 押下 index を記録するだけ。発火は解放時に行い、押下/解放の双方を
+        # ここで消費する。こうしないと、クリック直後に一覧を隠した際にマウス
+        # グラブが外れ、解放イベントがメインウィンドウへ伝播して左右クリック
+        # ナビゲーション(move_index)を誤発火し、隣の画像が開いてしまう。
         if event.button() == Qt.LeftButton:
-            cell = self._cell_size()
-            col = event.x() // cell
-            row = event.y() // cell
-            if not (0 <= row < self._rows) or col >= self.columns:
-                return
-            start = self._row_starts[row]
-            end = (
-                self._row_starts[row + 1]
-                if row + 1 < len(self._row_starts)
-                else len(self.images)
-            )
-            idx = start + col
-            if idx < end:  # 行内の実セル数を超えたクリック(空白部)は無視
+            self._press_idx = self._index_at(event.pos())
+            event.accept()
+        else:
+            super().mousePressEvent(event)  # 右クリック等は既定動作(コンテキストメニュー)へ
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            idx = self._index_at(event.pos())
+            press = self._press_idx
+            self._press_idx = None
+            event.accept()  # 先にイベントを確定してから発火(発火中に一覧が隠れても安全)
+            if idx is not None and idx == press:
                 self.thumbnailClicked.emit(idx)
+        else:
+            super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
         if event.modifiers() == Qt.ControlModifier:
@@ -838,7 +872,7 @@ class ImageViewer(QWidget):
         if self.index >= len(self.images):
             self.index = len(self.images) - 1
 
-        self.progress_bar.set_images(self.images, self.index)
+        self.progress_bar.set_images(self.images, self.index, self._progress_group_keys())
         self.is_loading = False
         self.load_pixmap()
 
@@ -1135,28 +1169,39 @@ class ImageViewer(QWidget):
                 natural_sort_key(os.path.basename(p)),
                 natural_sort_key(os.path.dirname(p)),
             ))
+        elif self.sort_mode == "seed":
+            def seed_key(p):
+                s = self._seed_of(p)
+                # seed 有り(0) を先に、無し(1) を後ろに。seed は数値で昇順。
+                return (0, int(s)) if s is not None else (1, 0)
+            self.images.sort(key=lambda p: (
+                seed_key(p),
+                natural_sort_key(os.path.dirname(p)),
+                natural_sort_key(os.path.basename(p)),
+            ))
         else:  # "folder"
             self.images.sort(key=lambda p: (
                 natural_sort_key(os.path.dirname(p)),
                 natural_sort_key(os.path.basename(p)),
             ))
 
-    def toggle_sort_mode(self):
-        """フォルダ順 / ファイル名順 を切り替える。表示中の画像はそのまま維持。"""
-        if not self.images:
+    def set_sort_mode(self, mode):
+        """並べ替えモード ('folder'/'filename'/'seed') を設定する。
+        表示中の画像はそのまま維持する。"""
+        if not self.images or mode == self.sort_mode:
             return
         current_image_path = self.images[self.index]
-        self.sort_mode = "filename" if self.sort_mode == "folder" else "folder"
+        self.sort_mode = mode
         self._sort_images()
         if current_image_path in self.images:
             self.index = self.images.index(current_image_path)
-        self.progress_bar.set_images(self.images, self.index)
+        self.progress_bar.set_images(self.images, self.index, self._progress_group_keys())
         if self.grid_mode:
             self.grid.set_images(
                 self.images,
                 self.index,
-                self.grid_columns,
-                group_by_folder=(self.sort_mode == "folder"),
+                self.grid.columns,
+                group_keys=self._grid_group_keys(),
             )
             QTimer.singleShot(0, self._scroll_grid_to_current)
         else:
@@ -1174,8 +1219,8 @@ class ImageViewer(QWidget):
             self.grid.set_images(
                 self.images,
                 self.index,
-                self.grid_columns,
-                group_by_folder=(self.sort_mode == "folder"),
+                self.grid.columns,
+                group_keys=self._grid_group_keys(),
             )
             self.scroll_area.show()
             self.setWindowTitle(f"一覧表示 - {len(self.images)}枚")
@@ -1237,15 +1282,15 @@ class ImageViewer(QWidget):
             self.pan_offset = QPoint(0, 0)
             self.is_original_size = False
             self.update_history()
-            self.progress_bar.set_images(self.images, self.index)
+            self.progress_bar.set_images(self.images, self.index, self._progress_group_keys())
             self.load_pixmap()
             self.display_pixmap()
             if self.grid_mode:
                 self.grid.set_images(
                 self.images,
                 self.index,
-                self.grid_columns,
-                group_by_folder=(self.sort_mode == "folder"),
+                self.grid.columns,
+                group_keys=self._grid_group_keys(),
             )
                 QTimer.singleShot(0, self._scroll_grid_to_current)
 
@@ -1300,10 +1345,13 @@ class ImageViewer(QWidget):
             reload_action.triggered.connect(self.reload_current_dir)
             context_menu.addAction(reload_action)
 
-            sort_label = "ファイル名順で並べ替え" if self.sort_mode == "folder" else "フォルダ順に戻す"
-            sort_action = QAction(sort_label, self)
-            sort_action.triggered.connect(self.toggle_sort_mode)
-            context_menu.addAction(sort_action)
+            sort_menu = context_menu.addMenu("並べ替え")
+            for label, mode in (("フォルダ順", "folder"), ("ファイル名順", "filename"), ("seed順", "seed")):
+                act = QAction(label, self)
+                act.setCheckable(True)
+                act.setChecked(self.sort_mode == mode)
+                act.triggered.connect(lambda _, m=mode: self.set_sort_mode(m))
+                sort_menu.addAction(act)
 
             pickup_action = QAction("ファイル名の記録", self)
             pickup_action.triggered.connect(self.pickup_current_image)
@@ -1364,7 +1412,7 @@ class ImageViewer(QWidget):
         if current_image_path and current_image_path in self.images:
             # 表示中画像はそのまま: index 復元、タイトル/プログレスバーのみ更新
             self.index = self.images.index(current_image_path)
-            self.progress_bar.set_images(self.images, self.index)
+            self.progress_bar.set_images(self.images, self.index, self._progress_group_keys())
             self.load_pixmap()  # title と progress を最新の総数で更新
         else:
             # 表示中画像が消えた場合は近傍にフォールバック
@@ -1372,7 +1420,7 @@ class ImageViewer(QWidget):
             self.zoom_factor = 1.0
             self.pan_offset = QPoint(0, 0)
             self.is_original_size = False
-            self.progress_bar.set_images(self.images, self.index)
+            self.progress_bar.set_images(self.images, self.index, self._progress_group_keys())
             self.load_pixmap()
             self.display_pixmap()
 
@@ -1380,8 +1428,8 @@ class ImageViewer(QWidget):
             self.grid.set_images(
                 self.images,
                 self.index,
-                self.grid_columns,
-                group_by_folder=(self.sort_mode == "folder"),
+                self.grid.columns,
+                group_keys=self._grid_group_keys(),
             )
 
         diff = new_count - old_count
@@ -1417,6 +1465,45 @@ class ImageViewer(QWidget):
                 "保存失敗",
                 f"ピックアップファイルへの書き込みに失敗しました:\n{e}",
             )
+
+    def _parse_image_meta(self, image_path):
+        """画像パスから対応する JSON パスと seed を求める。
+        ファイル名の '_seed' より前を JSON の基底名 (例: 0001_seed405730226.png
+        → 0001.json) とし、'_seed' 直後の数字列を seed (405730226) とする。
+        '_seed' が無い場合は拡張子のみ差し替えた JSON を対応とし seed は None。"""
+        directory = os.path.dirname(image_path)
+        stem = os.path.splitext(os.path.basename(image_path))[0]
+        m = re.search(r"_seed(\d+)", stem)
+        if m:
+            prefix = stem[: m.start()]
+            seed = m.group(1)
+        else:
+            prefix = stem
+            seed = None
+        json_path = os.path.normpath(os.path.join(directory, prefix + ".json"))
+        return json_path, seed
+
+    def _seed_of(self, image_path):
+        """画像パスの seed 文字列を返す ('_seed' が無ければ None)。"""
+        return self._parse_image_meta(image_path)[1]
+
+    def _grid_group_keys(self):
+        """一覧(グリッド)の区切り基準キー列を sort_mode に応じて返す。
+        folder: フォルダ(dirname) で区切る / seed: seed 値で区切る /
+        filename: 区切らない(None)。"""
+        if self.sort_mode == "seed":
+            return [self._seed_of(p) or "" for p in self.images]
+        elif self.sort_mode == "folder":
+            return [os.path.dirname(p) for p in self.images]
+        else:  # filename
+            return None
+
+    def _progress_group_keys(self):
+        """プログレスバーの色替え基準キー列。seed 順なら seed で、
+        それ以外はフォルダ(dirname)で区切る。"""
+        if self.sort_mode == "seed":
+            return [self._seed_of(p) or "" for p in self.images]
+        return [os.path.dirname(p) for p in self.images]
 
     def open_in_explorer(self, path):
         if sys.platform == "win32":
