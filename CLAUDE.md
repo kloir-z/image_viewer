@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A PyQt5-based image viewer for Windows. Single-file application that displays images with drag-and-drop support, EXIF rotation handling, selectable-depth subfolder browsing, zoom/pan, and directory history tracking.
+A PyQt5-based image viewer for Windows that displays images with drag-and-drop support, EXIF rotation handling, selectable-depth subfolder browsing, zoom/pan, and directory history tracking. The code lives in two modules: [image_viewer.py](image_viewer.py) (the `ImageViewer` main window plus the program entry point) and [widgets.py](widgets.py) (the self-contained supporting widgets).
 
 ## Commands
 
@@ -29,7 +29,12 @@ start.bat
 
 ## Architecture
 
-The entire application is in [image_viewer.py](image_viewer.py):
+The code is split across two modules:
+
+- [image_viewer.py](image_viewer.py): the **ImageViewer** main window class and the `if __name__ == "__main__"` entry point.
+- [widgets.py](widgets.py): the self-contained supporting widgets — **ResizableLabel**, **ProgressIndicator**, **ThumbnailLoader**, **ThumbnailGrid**, **GridScrollArea**, **JsonOverlay**. None of them depend on `ImageViewer` (the EXIF-rotation helper that `ThumbnailLoader` needs is injected via its constructor's `rotate_func` argument), so `widgets.py` imports nothing from `image_viewer.py` and there is no circular import. `register_heif_opener()` is called once in `image_viewer.py` at import time, which covers HEIF decoding for both modules (thumbnails are only generated at runtime, after that registration).
+
+The classes:
 
 - **ImageViewer** (QWidget): main window class handling all functionality
   - Drag-and-drop file/directory loading (multiple folders/files can be dropped at once)
