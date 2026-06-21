@@ -234,7 +234,8 @@ class ThumbnailGrid(QWidget):
     列数を固定し、ウィンドウ幅に応じて各セルを拡大縮小する。
     表示範囲のサムネイルだけを ThumbnailLoader に遅延要求する。"""
 
-    thumbnailClicked = pyqtSignal(int)
+    thumbnailSelected = pyqtSignal(int)   # 単クリック/カーソルキーで選択(青枠移動)
+    thumbnailActivated = pyqtSignal(int)  # ダブルクリックで1枚表示を開く
 
     PAD = 6
     SEP_THICKNESS = 2  # フォルダ区切り線の太さ(px)
@@ -293,6 +294,29 @@ class ThumbnailGrid(QWidget):
     def set_current_index(self, index):
         self.current_index = index
         self.update()
+
+    def index_in_direction(self, idx, drow, dcol):
+        """現在 index から上下左右へ1セル移動した先の index を返す。
+        左右は読み順で線形移動、上下は同じ列で隣の行へ(グループ改行も考慮)。
+        範囲外なら idx をそのまま返す。"""
+        if not self.images or idx is None or not (0 <= idx < len(self._positions)):
+            return idx
+        if dcol:
+            new = idx + dcol
+            return new if 0 <= new < len(self.images) else idx
+        if drow:
+            row, col = self._positions[idx]
+            nrow = row + drow
+            if not (0 <= nrow < self._rows):
+                return idx
+            start = self._row_starts[nrow]
+            end = (
+                self._row_starts[nrow + 1]
+                if nrow + 1 < len(self._row_starts)
+                else len(self.images)
+            )
+            return min(start + col, end - 1)  # その行が短ければ行末へ
+        return idx
 
     def set_columns(self, cols):
         self.columns = max(self.MIN_COLS, min(cols, self.MAX_COLS))
@@ -503,10 +527,10 @@ class ThumbnailGrid(QWidget):
         return None
 
     def mousePressEvent(self, event):
-        # 押下 index を記録するだけ。発火は解放時に行い、押下/解放の双方を
-        # ここで消費する。こうしないと、クリック直後に一覧を隠した際にマウス
-        # グラブが外れ、解放イベントがメインウィンドウへ伝播して左右クリック
-        # ナビゲーション(move_index)を誤発火し、隣の画像が開いてしまう。
+        # 押下 index を記録し、押下/解放の双方をここで消費する。こうしないと、
+        # ダブルクリックで一覧を隠した直後に解放イベントがメインウィンドウへ
+        # 伝播し、左右クリックナビゲーション(move_index)を誤発火して隣の画像が
+        # 開いてしまう。
         if event.button() == Qt.LeftButton:
             self._press_idx = self._index_at(event.pos())
             event.accept()
@@ -514,15 +538,30 @@ class ThumbnailGrid(QWidget):
             super().mousePressEvent(event)  # 右クリック等は既定動作(コンテキストメニュー)へ
 
     def mouseReleaseEvent(self, event):
+        # 単クリックは「選択」(青枠の移動)のみ。表示の切替はダブルクリックで行う。
         if event.button() == Qt.LeftButton:
             idx = self._index_at(event.pos())
             press = self._press_idx
             self._press_idx = None
-            event.accept()  # 先にイベントを確定してから発火(発火中に一覧が隠れても安全)
+            event.accept()
             if idx is not None and idx == press:
-                self.thumbnailClicked.emit(idx)
+                self.current_index = idx
+                self.update()
+                self.thumbnailSelected.emit(idx)
         else:
             super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        # ダブルクリックでその画像を1枚表示で開く。
+        if event.button() == Qt.LeftButton:
+            idx = self._index_at(event.pos())
+            event.accept()
+            if idx is not None:
+                self.current_index = idx
+                self.update()
+                self.thumbnailActivated.emit(idx)
+        else:
+            super().mouseDoubleClickEvent(event)
 
     def wheelEvent(self, event):
         if event.modifiers() == Qt.ControlModifier:

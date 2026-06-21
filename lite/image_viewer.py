@@ -125,7 +125,8 @@ class ImageViewer(QWidget):
         self.thumb_loader.start()
         self.grid = ThumbnailGrid(self.thumb_loader)
         self.grid.set_columns(self.grid_columns)
-        self.grid.thumbnailClicked.connect(self.on_thumbnail_clicked)
+        self.grid.thumbnailSelected.connect(self.on_thumbnail_selected)
+        self.grid.thumbnailActivated.connect(self.on_thumbnail_activated)
         self.scroll_area = GridScrollArea(self.grid)
         self.scroll_area.hide()
         self.layout.addWidget(self.scroll_area)
@@ -293,11 +294,24 @@ class ImageViewer(QWidget):
         elif event.key() == Qt.Key_F:
             self.showFullScreen()
         elif event.key() == Qt.Key_Left:
-            if not self.grid_mode:
+            if self.grid_mode:
+                self._grid_move(0, -1)
+            else:
                 self.move_index(-1)
         elif event.key() == Qt.Key_Right:
-            if not self.grid_mode:
+            if self.grid_mode:
+                self._grid_move(0, 1)
+            else:
                 self.move_index(1)
+        elif event.key() == Qt.Key_Up:
+            if self.grid_mode:
+                self._grid_move(-1, 0)
+        elif event.key() == Qt.Key_Down:
+            if self.grid_mode:
+                self._grid_move(1, 0)
+        elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            if self.grid_mode:
+                self.on_thumbnail_activated(self.index)
         elif event.key() == Qt.Key_F5:
             self.reload_current_dir()
         elif event.key() == Qt.Key_S:
@@ -782,11 +796,23 @@ class ImageViewer(QWidget):
         self.scroll_area.verticalScrollBar().setValue(y)
         self.grid.update()
 
-    def on_thumbnail_clicked(self, idx):
-        """一覧でサムネイルをクリック: その画像を1枚表示で開く。"""
+    def on_thumbnail_selected(self, idx):
+        """一覧で単クリック/カーソルキー: 選択(青枠)を移動する。表示は切り替えない。"""
+        if 0 <= idx < len(self.images):
+            self.index = idx
+
+    def on_thumbnail_activated(self, idx):
+        """一覧でダブルクリック/Enter: その画像を1枚表示で開く。"""
         if not (0 <= idx < len(self.images)):
             return
         self.index = idx
+        # マウスイベント列(press/release/dblclick/release)が完了してから切り替える。
+        # 切替中に一覧を隠すとマウスグラブが外れ、直後の release がメインウィンドウへ
+        # 漏れて左右クリックナビゲーションを誤発火するのを防ぐ。
+        QTimer.singleShot(0, self._enter_single_view)
+
+    def _enter_single_view(self):
+        """現在の index を1枚表示で開く(一覧→1枚)。"""
         self.zoom_factor = 1.0
         self.pan_offset = QPoint(0, 0)
         self.is_original_size = False
@@ -798,6 +824,16 @@ class ImageViewer(QWidget):
         self.progress_bar.set_index(self.index)
         self.load_pixmap()
         self.display_pixmap()
+
+    def _grid_move(self, drow, dcol):
+        """一覧表示でカーソルキーにより選択(青枠)を移動する。"""
+        if not self.images:
+            return
+        new = self.grid.index_in_direction(self.index, drow, dcol)
+        if new != self.index:
+            self.index = new
+            self.grid.set_current_index(new)
+            self._scroll_grid_to_current()
 
     def setup_images_and_index(self, dir_path, filename=None, last_image_path=None):
         if self.images:
