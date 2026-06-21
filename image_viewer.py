@@ -24,6 +24,7 @@ from PyQt5.QtGui import QPixmap, QImage, QPainter, QColor, QPen
 from PyQt5.QtCore import (
     Qt,
     QPoint,
+    QPointF,
     QTimer,
     QRect,
     pyqtSignal,
@@ -140,10 +141,13 @@ class ThumbnailLoader(QThread):
     縮小結果(小さいQImage)を ThumbnailGrid 側でキャッシュし、スクロールの度に
     元の大きな画像を読み直さないようにする。"""
 
-    thumbnailReady = pyqtSignal(str, QImage)
+    # 生成に使った最大辺(gen_max)も併せて通知する。セルが大きい(列が少ない)
+    # ときに低解像のままだとボケるため、グリッド側が要求解像度を引き上げ、
+    # それより低い解像度でキャッシュ済みのセルだけ取り直せるようにする。
+    thumbnailReady = pyqtSignal(str, QImage, int)
     thumbnailFailed = pyqtSignal(str)
 
-    THUMB_MAX = 256  # 縮小後の最大辺(px)。セルサイズと独立にしておけば列数変更でも再生成不要。
+    THUMB_MAX = 256  # 縮小後の最大辺の既定値(px)。グリッドが set_thumb_max で上書きする。
 
     def __init__(self, rotate_func, parent=None):
         super().__init__(parent)
@@ -153,6 +157,11 @@ class ThumbnailLoader(QThread):
         self._queue = []        # 読み込み待ちパス (末尾ほど優先 = 直近に要求されたもの)
         self._requested = set()  # 重複要求の防止
         self._running = True
+        self._thumb_max = self.THUMB_MAX  # 現在の生成解像度(セルサイズに応じて変動)
+
+    def set_thumb_max(self, n):
+        """以後生成するサムネイルの最大辺(px)を設定する。"""
+        self._thumb_max = max(1, int(n))
 
     def request(self, paths):
         """表示に必要なパス群を要求する。既に要求済みのものは無視。"""
@@ -188,20 +197,22 @@ class ThumbnailLoader(QThread):
             path = self._queue.pop()  # LIFO: 直近に見えたセルを優先して処理
             self._mutex.unlock()
 
-            qimg = self._generate(path)
+            result = self._generate(path)
 
             self._mutex.lock()
             self._requested.discard(path)
             self._mutex.unlock()
 
-            if qimg is None:
+            if result is None:
                 self.thumbnailFailed.emit(path)
             else:
-                self.thumbnailReady.emit(path, qimg)
+                qimg, gen_max = result
+                self.thumbnailReady.emit(path, qimg, gen_max)
 
     def _generate(self, path):
         if not os.path.exists(path):
             return None
+        thumb_max = self._thumb_max  # 取り出し時点の要求解像度を採用し、それを通知する
         try:
             ImageFile.LOAD_TRUNCATED_IMAGES = True
             with open(path, "rb") as f:
@@ -213,7 +224,7 @@ class ThumbnailLoader(QThread):
                     pass
                 if image.mode != "RGB":
                     image = image.convert("RGB")
-                image.thumbnail((self.THUMB_MAX, self.THUMB_MAX), Image.LANCZOS)
+                image.thumbnail((thumb_max, thumb_max), Image.LANCZOS)
                 data = image.tobytes("raw", "RGB")
                 qimg = QImage(
                     data,
@@ -223,7 +234,7 @@ class ThumbnailLoader(QThread):
                     QImage.Format_RGB888,
                 )
                 # data は関数終了で解放されるため、独立したコピーを返す
-                return qimg.copy()
+                return qimg.copy(), thumb_max
         except Exception:
             return None
 
@@ -246,6 +257,11 @@ class ThumbnailGrid(QWidget):
     MIN_COLS = 2
     MAX_COLS = 8
 
+    # サムネイル解像度の調整。セル(=表示サイズ)が大きいほど高解像で生成する。
+    THUMB_MIN = 256        # 最小解像度(列が多くセルが小さいとき)
+    THUMB_MAX_CAP = 768    # 最大解像度(列が少なくセルが大きいとき)。メモリ/CPU の上限
+    THUMB_STEP = 128       # 量子化幅。リサイズの度に作り直さないよう段階化する
+
     def __init__(self, loader, parent=None):
         super().__init__(parent)
         self.loader = loader
@@ -253,8 +269,12 @@ class ThumbnailGrid(QWidget):
         self.columns = 5
         self.current_index = 0
         self.group_keys = None        # 各画像のグループ化キー(list) / None=区切りなし
-        self.cache = OrderedDict()    # path -> QPixmap (LRU)
-        self.cache_cap = 600
+        self.cache = OrderedDict()    # path -> (QPixmap, gen_max) (LRU)
+        # キャッシュは件数ではなく総ピクセル面積で上限を設ける。こうすると高解像
+        # サムネイルは少なく、低解像なら多く保持でき、解像度が変動してもメモリが
+        # 概ね一定(約 600 枚 × 256² ≒ 157MB 相当)に収まる。
+        self.cache_area_budget = 600 * 256 * 256
+        self._cache_area = 0          # 現在のキャッシュ総ピクセル数
         self.failed = set()
         self._index_of = {}           # path -> index (セル矩形の部分更新用)
         self._positions = []          # index -> (row, col)
@@ -358,12 +378,30 @@ class ThumbnailGrid(QWidget):
         row, col = self._positions[idx]
         return QRect(col * cell, row * cell, cell, cell)
 
-    def _on_ready(self, path, qimg):
+    def _cache_put(self, path, pm, gen_max):
+        """サムネイルをキャッシュへ格納し、総面積が上限を超えたら LRU で退避する。"""
+        old = self.cache.pop(path, None)
+        if old is not None:
+            self._cache_area -= old[0].width() * old[0].height()
+        self.cache[path] = (pm, gen_max)
+        self._cache_area += pm.width() * pm.height()
+        while self._cache_area > self.cache_area_budget and len(self.cache) > 1:
+            _p, (opm, _g) = self.cache.popitem(last=False)
+            self._cache_area -= opm.width() * opm.height()
+
+    def _desired_thumb_max(self):
+        """現在のセルサイズ(と高DPI倍率)から望ましいサムネイル解像度を求める。
+        リサイズの度に作り直さないよう THUMB_STEP 単位に切り上げて段階化する。"""
+        cell = self._cell_size()
+        inner = max(1, cell - 2 * self.PAD)
+        target = inner * self.devicePixelRatioF()
+        step = self.THUMB_STEP
+        quantized = ((int(target) + step - 1) // step) * step
+        return max(self.THUMB_MIN, min(quantized, self.THUMB_MAX_CAP))
+
+    def _on_ready(self, path, qimg, gen_max):
         pm = QPixmap.fromImage(qimg)
-        self.cache[path] = pm
-        self.cache.move_to_end(path)
-        while len(self.cache) > self.cache_cap:
-            self.cache.popitem(last=False)
+        self._cache_put(path, pm, gen_max)
         idx = self._index_of.get(path)
         if idx is not None and idx < len(self._positions):
             self.update(self._cell_rect(idx))
@@ -399,20 +437,34 @@ class ThumbnailGrid(QWidget):
                 else n - 1
             )
 
+            desired = self._desired_thumb_max()
+            dpr = self.devicePixelRatioF()
             need = []
             for idx in range(first_idx, last_idx + 1):
                 rect = self._cell_rect(idx)
                 inner = rect.adjusted(self.PAD, self.PAD, -self.PAD, -self.PAD)
                 path = self.images[idx]
-                pm = self.cache.get(path)
-                if pm is not None:
+                entry = self.cache.get(path)
+                if entry is not None:
+                    pm, gen_max = entry
                     self.cache.move_to_end(path)
+                    # 高DPIでは物理ピクセル数まで拡大してから dpr を設定すると、
+                    # 縮小描画でディテールが失われずくっきり表示される。
+                    tw = max(1, int(inner.width() * dpr))
+                    th = max(1, int(inner.height() * dpr))
                     scaled = pm.scaled(
-                        inner.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+                        tw, th, Qt.KeepAspectRatio, Qt.SmoothTransformation
                     )
-                    dx = inner.x() + (inner.width() - scaled.width()) // 2
-                    dy = inner.y() + (inner.height() - scaled.height()) // 2
-                    painter.drawPixmap(dx, dy, scaled)
+                    scaled.setDevicePixelRatio(dpr)
+                    lw = scaled.width() / dpr
+                    lh = scaled.height() / dpr
+                    dx = inner.x() + (inner.width() - lw) / 2
+                    dy = inner.y() + (inner.height() - lh) / 2
+                    painter.drawPixmap(QPointF(dx, dy), scaled)
+                    # セルが大きくなり、今より高い解像度が必要なら取り直す
+                    # (それまでは現在の低解像をそのまま表示し続ける)
+                    if gen_max < desired:
+                        need.append(path)
                 elif path in self.failed:
                     painter.fillRect(inner, self.FAILED_COLOR)
                 else:
@@ -437,6 +489,7 @@ class ThumbnailGrid(QWidget):
             painter.end()
 
         if need:
+            self.loader.set_thumb_max(desired)  # 以後の生成を現在のセルに見合う解像度へ
             self.loader.request(need)
 
     def _index_at(self, pos):
@@ -595,6 +648,13 @@ class ImageViewer(QWidget):
         self.click_timer = QTimer()
         self.click_timer.setSingleShot(True)
         self.click_timer.timeout.connect(self.reset_click_count)
+
+        # F5 を押さなくても定期的にフォルダを再スキャンし、追加/削除を自動反映する。
+        # reload_current_dir は変化がなければ何もしないため、無駄な再描画はない。
+        self.auto_reload_timer = QTimer(self)
+        self.auto_reload_timer.setInterval(5000)
+        self.auto_reload_timer.timeout.connect(self._auto_reload_tick)
+        self.auto_reload_timer.start()
         self.is_original_size = False
         self.current_root_path = None  # ユーザーが選択した親フォルダ (複数選択時は共通の親)
         self.current_roots = []  # 実際に読み込んだフォルダ群 (単一選択時は [current_root_path])
@@ -1213,37 +1273,41 @@ class ImageViewer(QWidget):
         while len(self.history) > 20:
             self.history.popitem(last=False)
 
-    def _sort_images(self):
-        """現在の sort_mode に従って self.images を並べ替える。
+    def _sorted_images(self, images):
+        """与えられたパス列を現在の sort_mode に従って並べ替えた新しいリストを返す。
         フォルダ順: (dirname, basename) の自然順 (構築順と等価)。
         ファイル名順: (basename, dirname) の自然順 — 同名ファイルはフォルダ名順で並ぶ。
         seed順: (seed数値, dirname, basename) — seed の無いものは末尾。"""
-        if not self.images:
-            return
-
         def natural_sort_key(s):
             return [int(text) if text.isdigit() else text for text in re.split(r"(\d+)", s)]
 
         if self.sort_mode == "filename":
-            self.images.sort(key=lambda p: (
+            key = lambda p: (
                 natural_sort_key(os.path.basename(p)),
                 natural_sort_key(os.path.dirname(p)),
-            ))
+            )
         elif self.sort_mode == "seed":
             def seed_key(p):
                 s = self._seed_of(p)
                 # seed 有り(0) を先に、無し(1) を後ろに。seed は数値で昇順。
                 return (0, int(s)) if s is not None else (1, 0)
-            self.images.sort(key=lambda p: (
+            key = lambda p: (
                 seed_key(p),
                 natural_sort_key(os.path.dirname(p)),
                 natural_sort_key(os.path.basename(p)),
-            ))
+            )
         else:  # "folder"
-            self.images.sort(key=lambda p: (
+            key = lambda p: (
                 natural_sort_key(os.path.dirname(p)),
                 natural_sort_key(os.path.basename(p)),
-            ))
+            )
+        return sorted(images, key=key)
+
+    def _sort_images(self):
+        """現在の sort_mode に従って self.images を並べ替える。"""
+        if not self.images:
+            return
+        self.images = self._sorted_images(self.images)
 
     def set_sort_mode(self, mode):
         """並べ替えモード ('folder'/'filename'/'seed') を設定する。
@@ -1463,6 +1527,20 @@ class ImageViewer(QWidget):
                     self.current_root_path = None
                     self.current_depth = 0
 
+    def _auto_reload_tick(self):
+        """自動リロードの定期処理。読み込み中やダイアログ/コンテキストメニュー
+        表示中は見送り、それ以外で現在フォルダを再スキャンする。"""
+        if self.is_loading:
+            return
+        # モーダルダイアログ(階層選択・保存先選択等)やポップアップ(右クリック
+        # メニュー)の表示中は、その操作が終わるまでリロードしない。
+        if (
+            QApplication.activeModalWidget() is not None
+            or QApplication.activePopupWidget() is not None
+        ):
+            return
+        self.reload_current_dir()
+
     def reload_current_dir(self):
         """現在のフォルダ群を再スキャンして画像リストを更新。表示中の画像はそのまま維持。
         複数フォルダを読み込んでいる場合は全フォルダを共通の階層で再スキャンする。"""
@@ -1478,10 +1556,15 @@ class ImageViewer(QWidget):
         new_images = []
         for r in roots:
             new_images.extend(self._collect_dir_images(r, max_depth))
+        new_images = self._sorted_images(new_images)
+
+        # ファイル構成に変化がなければ何もしない。これにより5秒ごとの自動リロード
+        # でも画像/プログレスバー/グリッドを無駄に再構築せず、ちらつきを防ぐ。
+        if new_images == self.images:
+            return
 
         old_count = len(self.images)
         self.images = new_images
-        self._sort_images()
         new_count = len(self.images)
 
         if not self.images:
@@ -1710,6 +1793,7 @@ class ImageViewer(QWidget):
     def closeEvent(self, event):
         if self.images:
             self.update_history()
+        self.auto_reload_timer.stop()
         self.thumb_loader.stop()
         config = {
             "history": self.history,
