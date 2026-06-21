@@ -32,8 +32,9 @@ start.bat
 The entire application is in [image_viewer.py](image_viewer.py):
 
 - **ImageViewer** (QWidget): main window class handling all functionality
-  - Drag-and-drop file/directory loading
-  - Command-line file/directory argument support (so `open.bat` can pass the clicked file)
+  - Drag-and-drop file/directory loading (multiple folders/files can be dropped at once)
+  - Command-line file/directory argument support (so `open.bat` can pass the clicked file). **Multiple paths are accepted** (`sys.argv[1:]`), so selecting several folders in Explorer and using "送る"/Send To opens them all together — the SendTo target forwards every selected item to one invocation and `open.bat %*` passes them through. All paths are funneled into `load_images_from_dirs()`. The arg is loaded synchronously after `show()`; the subfolder-depth `QInputDialog` it may raise is safe because `display_pixmap()` no-ops while `self.pixmap` is `None` (the dialog's nested event loop can deliver a `resizeEvent` before the first image is loaded — `self.images` is already populated but `self.pixmap` is not yet)
+  - **Multi-folder input** (`load_images_from_dirs`): takes a list of folders, asks the subfolder-depth `QInputDialog` **once** and applies that depth to every folder, then concatenates each folder's images (via the shared `_collect_dir_images`) into one list. Delegates to `load_images_from_dir` when only one valid folder remains after dedup. `self.current_roots` holds the actually-loaded folders (always `[current_root_path]` in the single-folder case); `self.current_root_path` becomes the folders' `os.path.commonpath` (falling back to the first folder across drives) and serves as the base for pickup relative paths. History records each selected folder as its own entry; F5 re-scans all of `current_roots`
   - Image navigation via keyboard (Left/Right), mouse clicks (left 25% / right 75%), mouse wheel, or progress bar
   - Full screen toggle (F key, Escape to exit)
   - Ctrl+wheel zoom centered at cursor, drag to pan, double-click to reset, triple-click to toggle 1:1 original size
@@ -97,3 +98,4 @@ The entire application is in [image_viewer.py](image_viewer.py):
 - `maximized`: bool, true if the window was maximized at close; restored via `showMaximized()` on next launch
 - `suppress_missing_file_warning`: bool, true once the user checks "don't show again"
 - `grid_columns`: int, number of columns in the thumbnail grid view (default 5, range 2–8)
+  - When several folders are loaded together, each is recorded as its own entry (sharing the one chosen depth); `last_image_path` is the displayed image for the folder it belongs to, otherwise that folder's first image

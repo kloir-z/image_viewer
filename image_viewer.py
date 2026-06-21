@@ -493,6 +493,7 @@ class ImageViewer(QWidget):
         self.is_loading = False
         self.index = 0
         self.images = []
+        self.pixmap = None  # 画像未読み込み時は None (display_pixmap でガード)
         self.zoom_factor = 1.0
         self.pan_offset = QPoint(0, 0)
         self.is_panning = False
@@ -512,7 +513,8 @@ class ImageViewer(QWidget):
         self.click_timer.setSingleShot(True)
         self.click_timer.timeout.connect(self.reset_click_count)
         self.is_original_size = False
-        self.current_root_path = None  # ユーザーが選択した親フォルダ
+        self.current_root_path = None  # ユーザーが選択した親フォルダ (複数選択時は共通の親)
+        self.current_roots = []  # 実際に読み込んだフォルダ群 (単一選択時は [current_root_path])
         self.current_depth = 0  # 選択された階層数 (0=なし, 1-3=階層, -1=全階層)
         self.current_pickup_file = None  # 現在セッションのピックアップ保存先
         self.sort_mode = "folder"  # "folder"=フォルダ順 / "filename"=ファイル名順 (config未保存)
@@ -860,6 +862,11 @@ class ImageViewer(QWidget):
         return image
 
     def display_pixmap(self):
+        # まだ画像を読み込んでいない場合は何もしない。
+        # 例: サブフォルダ階層ダイアログ表示中に resizeEvent が割り込むと、
+        # self.images は非空でも self.pixmap が未生成のことがある。
+        if self.pixmap is None:
+            return
         # 原寸表示モードの場合
         if self.is_original_size:
             base_pixmap = self.pixmap
@@ -913,123 +920,210 @@ class ImageViewer(QWidget):
 
     def dropEvent(self, event):
         urls = event.mimeData().urls()
-        if len(urls) != 1:
+        if not urls:
             return
-        path = urls[0].toLocalFile()
-        if os.path.isdir(path):
-            dir_path = os.path.normpath(path)
-            filename = None
-        else:
-            dir_path = os.path.normpath(os.path.dirname(path))
-            filename = os.path.basename(path)
-        self.load_images_from_dir(dir_path, filename)
+        dirs = []
+        filename = None
+        for url in urls:
+            path = url.toLocalFile()
+            if os.path.isdir(path):
+                dirs.append(os.path.normpath(path))
+            elif os.path.exists(path):
+                dirs.append(os.path.normpath(os.path.dirname(path)))
+                if filename is None:
+                    filename = os.path.basename(path)
+        if not dirs:
+            return
+        # load_images_from_dirs はフォルダが1つなら単一読み込みに委譲する
+        self.load_images_from_dirs(dirs, filename)
+
+    @staticmethod
+    def _natural_sort_key(s):
+        return [int(text) if text.isdigit() else text for text in re.split(r"(\d+)", s)]
+
+    def _has_subfolders(self, dir_path):
+        try:
+            return any(f.is_dir() for f in os.scandir(dir_path))
+        except OSError:
+            return False
+
+    @staticmethod
+    def _depth_to_max(depth):
+        """current_depth (0=なし / -1=全階層 / 1-3=階層) を再帰walk用の max_depth に変換。"""
+        if depth == 0:
+            return None
+        if depth == -1:
+            return float("inf")
+        return depth
+
+    def _ask_subfolder_depth(self):
+        """サブフォルダ読み込み階層をダイアログで尋ね、max_depth を返す。
+        併せて self.current_depth (0/-1/1-3) を設定する。キャンセル/読み込まないは 0。"""
+        choices = ["読み込まない", "1階層", "2階層", "3階層", "全階層"]
+        choice, ok = QInputDialog.getItem(
+            self,
+            "サブフォルダの読み込み",
+            "サブフォルダ内の画像ファイルを読み込む階層を選択してください：",
+            choices,
+            4,  # 既定を「全階層」にする
+            False,
+        )
+        if ok and choice != "読み込まない":
+            if choice == "全階層":
+                self.current_depth = -1
+                return float("inf")
+            self.current_depth = int(choice[0])
+            return self.current_depth
+        self.current_depth = 0
+        return None
+
+    def _collect_dir_images(self, dir_path, max_depth):
+        """dir_path 直下 + (max_depth に応じた) サブフォルダ内の対応画像パスを順に集めて返す。"""
+        result = []
+        try:
+            files = sorted(os.listdir(dir_path), key=self._natural_sort_key)
+        except OSError:
+            return result
+        for file in files:
+            if file.lower().endswith(tuple(self.supported_extensions)):
+                result.append(os.path.normpath(os.path.join(dir_path, file)))
+
+        if max_depth is not None and max_depth > 0:
+            def get_subfolders_recursive(path, depth):
+                if depth > max_depth:
+                    return []
+                folders = []
+                try:
+                    for f in os.scandir(path):
+                        if f.is_dir():
+                            folders.append(f.path)
+                            folders.extend(get_subfolders_recursive(f.path, depth + 1))
+                except (PermissionError, OSError):
+                    pass
+                return folders
+
+            all_subfolders = get_subfolders_recursive(dir_path, 1)
+            all_subfolders.sort(key=self._natural_sort_key)
+            for subfolder in all_subfolders:
+                try:
+                    subfiles = sorted(os.listdir(subfolder), key=self._natural_sort_key)
+                    for subfile in subfiles:
+                        if subfile.lower().endswith(tuple(self.supported_extensions)):
+                            result.append(os.path.normpath(os.path.join(subfolder, subfile)))
+                except (PermissionError, OSError):
+                    pass
+        return result
 
     def load_images_from_dir(self, dir_path, filename=None, from_history=False, saved_depth=None):
         if self.images:
             self.update_history()
-        self.images = []
 
         # ルートディレクトリを記録
         self.current_root_path = os.path.normpath(dir_path)
+        self.current_roots = [self.current_root_path]
         self.current_depth = 0  # デフォルト値
         self.current_pickup_file = None  # フォルダ切り替え時にリセット
 
-        def natural_sort_key(s):
-            return [int(text) if text.isdigit() else text for text in re.split(r"(\d+)", s)]
-
-        files = sorted(os.listdir(dir_path), key=natural_sort_key)
-        for file in files:
-            if file.lower().endswith(tuple(self.supported_extensions)):
-                self.images.append(os.path.normpath(os.path.join(dir_path, file)))
-
-        subfolders = [f.path for f in os.scandir(dir_path) if f.is_dir()]
-        if subfolders:
-            max_depth = None
-
+        # サブフォルダ階層の決定
+        max_depth = None
+        if self._has_subfolders(self.current_root_path):
             if from_history and saved_depth is not None:
                 # 履歴から開く場合はダイアログをスキップ
                 self.current_depth = saved_depth
-                if saved_depth == 0:
-                    max_depth = None
-                elif saved_depth == -1:
-                    max_depth = float("inf")
-                else:
-                    max_depth = saved_depth
+                max_depth = self._depth_to_max(saved_depth)
             else:
-                # ダイアログを表示
-                choices = ["読み込まない", "1階層", "2階層", "3階層", "全階層"]
-                choice, ok = QInputDialog.getItem(
-                    self,
-                    "サブフォルダの読み込み",
-                    "サブフォルダ内の画像ファイルを読み込む階層を選択してください：",
-                    choices,
-                    0,
-                    False,
-                )
-                if ok and choice != "読み込まない":
-                    if choice == "全階層":
-                        max_depth = float("inf")
-                        self.current_depth = -1
-                    else:
-                        max_depth = int(choice[0])
-                        self.current_depth = max_depth
-                else:
-                    self.current_depth = 0
+                max_depth = self._ask_subfolder_depth()
 
-            if max_depth is not None and max_depth > 0:
-                def get_subfolders_recursive(path, current_depth, max_depth):
-                    if current_depth > max_depth:
-                        return []
-                    folders = []
-                    try:
-                        for f in os.scandir(path):
-                            if f.is_dir():
-                                folders.append(f.path)
-                                folders.extend(get_subfolders_recursive(f.path, current_depth + 1, max_depth))
-                    except PermissionError:
-                        pass
-                    return folders
-
-                all_subfolders = get_subfolders_recursive(dir_path, 1, max_depth)
-                all_subfolders.sort(key=natural_sort_key)
-                for subfolder in all_subfolders:
-                    try:
-                        subfiles = sorted(os.listdir(subfolder), key=natural_sort_key)
-                        for subfile in subfiles:
-                            if subfile.lower().endswith(tuple(self.supported_extensions)):
-                                self.images.append(os.path.normpath(os.path.join(subfolder, subfile)))
-                    except PermissionError:
-                        pass
-
+        self.images = self._collect_dir_images(self.current_root_path, max_depth)
         self._sort_images()
-        self.setup_images_and_index(dir_path, filename)
+        self.setup_images_and_index(self.current_root_path, filename)
+
+    def load_images_from_dirs(self, dir_paths, filename=None):
+        """複数フォルダをまとめて読み込む。サブフォルダ階層のダイアログは
+        1回だけ尋ね、選択した全フォルダに共通で適用する。
+        有効なフォルダが1つなら load_images_from_dir に委譲する。"""
+        dirs = []
+        for d in dir_paths:
+            nd = os.path.normpath(d)
+            if os.path.isdir(nd) and nd not in dirs:
+                dirs.append(nd)
+        if not dirs:
+            return
+        if len(dirs) == 1:
+            self.load_images_from_dir(dirs[0], filename)
+            return
+
+        if self.images:
+            self.update_history()
+
+        self.current_roots = dirs
+        # pickup の相対パス等の基準として共通の親フォルダを記録
+        try:
+            self.current_root_path = os.path.normpath(os.path.commonpath(dirs))
+        except ValueError:
+            # 別ドライブ等で共通パスが取れない場合は先頭フォルダを基準にする
+            self.current_root_path = dirs[0]
+        self.current_depth = 0
+        self.current_pickup_file = None
+
+        # いずれかのフォルダにサブフォルダがあれば階層を1回だけ尋ねる
+        has_sub = any(self._has_subfolders(d) for d in dirs)
+        max_depth = self._ask_subfolder_depth() if has_sub else None
+
+        images = []
+        for d in dirs:
+            images.extend(self._collect_dir_images(d, max_depth))
+        self.images = images
+        self._sort_images()
+        self.setup_images_and_index(self.current_root_path, filename)
+
+    @staticmethod
+    def _is_under(path, root):
+        """path が root 配下 (または一致) かを判定する。
+        画像パスは root を起点に join して構築されるため接頭辞比較で十分。"""
+        path = os.path.normpath(path)
+        root = os.path.normpath(root)
+        return path == root or path.startswith(root + os.sep)
 
     def update_history(self):
-        if not self.images or self.current_root_path is None:
+        if not self.images or not self.current_roots:
             return
 
         current_image_path = os.path.normpath(self.images[self.index])
-        root_path = self.current_root_path
 
-        # 既存エントリを削除 (OrderedDictの末尾に移動するため)
-        if root_path in self.history:
-            del self.history[root_path]
+        # 読み込んだ各フォルダを個別エントリとして記録する。
+        # 表示中の画像が属するフォルダはその画像を、それ以外は先頭画像を
+        # last_image_path として保存する (後から1つずつ開き直せる)。
+        for root in self.current_roots:
+            root = os.path.normpath(root)
+            if self._is_under(current_image_path, root):
+                last_img = current_image_path
+            else:
+                last_img = next(
+                    (os.path.normpath(p) for p in self.images
+                     if self._is_under(os.path.normpath(p), root)),
+                    None,
+                )
 
-        # 新形式で保存
-        self.history[root_path] = {
-            "root_path": root_path,
-            "depth": self.current_depth,
-            "last_image_path": current_image_path
-        }
+            # 既存エントリを削除 (OrderedDictの末尾に移動するため)
+            if root in self.history:
+                del self.history[root]
+
+            self.history[root] = {
+                "root_path": root,
+                "depth": self.current_depth,
+                "last_image_path": last_img,
+            }
 
         # 履歴の上限を維持
-        if len(self.history) > 20:
+        while len(self.history) > 20:
             self.history.popitem(last=False)
 
     def _sort_images(self):
         """現在の sort_mode に従って self.images を並べ替える。
         フォルダ順: (dirname, basename) の自然順 (構築順と等価)。
-        ファイル名順: (basename, dirname) の自然順 — 同名ファイルはフォルダ名順で並ぶ。"""
+        ファイル名順: (basename, dirname) の自然順 — 同名ファイルはフォルダ名順で並ぶ。
+        seed順: (seed数値, dirname, basename) — seed の無いものは末尾。"""
         if not self.images:
             return
 
@@ -1241,52 +1335,20 @@ class ImageViewer(QWidget):
                     self.current_depth = 0
 
     def reload_current_dir(self):
-        """現在のフォルダを再スキャンして画像リストを更新。表示中の画像はそのまま維持。"""
-        if self.current_root_path is None or not os.path.exists(self.current_root_path):
+        """現在のフォルダ群を再スキャンして画像リストを更新。表示中の画像はそのまま維持。
+        複数フォルダを読み込んでいる場合は全フォルダを共通の階層で再スキャンする。"""
+        roots = [r for r in self.current_roots if os.path.exists(r)]
+        if not roots:
             return
 
         current_image_path = (
             os.path.normpath(self.images[self.index]) if self.images else None
         )
 
-        def natural_sort_key(s):
-            return [int(text) if text.isdigit() else text for text in re.split(r"(\d+)", s)]
-
-        new_images: list[str] = []
-        try:
-            files = sorted(os.listdir(self.current_root_path), key=natural_sort_key)
-        except OSError:
-            return
-        for file in files:
-            if file.lower().endswith(tuple(self.supported_extensions)):
-                new_images.append(os.path.normpath(os.path.join(self.current_root_path, file)))
-
-        if self.current_depth != 0:
-            max_depth = float("inf") if self.current_depth == -1 else self.current_depth
-
-            def get_subfolders_recursive(path, depth, max_depth):
-                if depth > max_depth:
-                    return []
-                folders = []
-                try:
-                    for f in os.scandir(path):
-                        if f.is_dir():
-                            folders.append(f.path)
-                            folders.extend(get_subfolders_recursive(f.path, depth + 1, max_depth))
-                except (PermissionError, OSError):
-                    pass
-                return folders
-
-            all_subfolders = get_subfolders_recursive(self.current_root_path, 1, max_depth)
-            all_subfolders.sort(key=natural_sort_key)
-            for subfolder in all_subfolders:
-                try:
-                    subfiles = sorted(os.listdir(subfolder), key=natural_sort_key)
-                    for subfile in subfiles:
-                        if subfile.lower().endswith(tuple(self.supported_extensions)):
-                            new_images.append(os.path.normpath(os.path.join(subfolder, subfile)))
-                except (PermissionError, OSError):
-                    pass
+        max_depth = self._depth_to_max(self.current_depth)
+        new_images = []
+        for r in roots:
+            new_images.extend(self._collect_dir_images(r, max_depth))
 
         old_count = len(self.images)
         self.images = new_images
@@ -1391,14 +1453,21 @@ if __name__ == "__main__":
         viewer.show()
 
     if len(sys.argv) > 1:
-        arg_path = sys.argv[1]
-        if os.path.exists(arg_path):
+        # 「送る」やドラッグ&ドロップで複数フォルダ/ファイルを渡せる。
+        # 各パスを読み込み対象フォルダに変換し、まとめて読み込む
+        # (フォルダが1つなら従来通り単一読み込みになる)。
+        dir_args = []
+        file_filename = None
+        for arg_path in sys.argv[1:]:
+            if not os.path.exists(arg_path):
+                continue
             if os.path.isdir(arg_path):
-                dir_path = os.path.normpath(arg_path)
-                filename = None
+                dir_args.append(os.path.normpath(arg_path))
             else:
-                dir_path = os.path.normpath(os.path.dirname(arg_path))
-                filename = os.path.basename(arg_path)
-            viewer.load_images_from_dir(dir_path, filename)
+                dir_args.append(os.path.normpath(os.path.dirname(arg_path)))
+                if file_filename is None:
+                    file_filename = os.path.basename(arg_path)
+        if dir_args:
+            viewer.load_images_from_dirs(dir_args, file_filename)
 
     sys.exit(app.exec_())
