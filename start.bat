@@ -24,11 +24,7 @@ if exist requirements.txt (
 echo No virtual environment or requirements.txt found, running the script directly...
 
 :run
-
-for %%f in (*.py) do (
-    python "%%f"
-    goto :end
-)
+python image_viewer.py
 
 :end
 pause
