@@ -310,6 +310,8 @@ class ImageViewer(QWidget):
                 self.move_index(1)
         elif event.key() == Qt.Key_F5:
             self.reload_current_dir()
+        elif event.key() == Qt.Key_S:
+            self.cycle_sort_mode()
 
     def move_index(self, delta):
         if not self.images or self.is_loading:
@@ -744,6 +746,14 @@ class ImageViewer(QWidget):
         else:
             self.load_pixmap()
             self.display_pixmap()
+
+    def cycle_sort_mode(self):
+        """並べ替えモードを folder → filename → seed → folder の順に切り替える。"""
+        if not self.images:
+            return
+        modes = ("folder", "filename", "seed")
+        next_mode = modes[(modes.index(self.sort_mode) + 1) % len(modes)]
+        self.set_sort_mode(next_mode)
 
     def toggle_grid_mode(self):
         """一覧 (グリッド) 表示 と 1枚表示 を切り替える。"""
