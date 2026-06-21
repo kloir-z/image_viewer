@@ -2,6 +2,8 @@ import os
 import re
 import sys
 import json
+import shutil
+import tempfile
 import subprocess
 from datetime import datetime
 from collections import OrderedDict
@@ -59,6 +61,12 @@ class ImageViewer(QWidget):
         self.click_timer = QTimer()
         self.click_timer.setSingleShot(True)
         self.click_timer.timeout.connect(self.reset_click_count)
+
+        # 削除のアンドゥ (アプリ管理ゴミ箱方式)。削除は一時フォルダへ退避し、
+        # Ctrl+Z で元の場所へ確実に戻す。終了時に残りを実ゴミ箱へ送る。
+        self._undo_stack = []      # 削除のアンドゥ履歴 (LIFO)
+        self._trash_dir = None     # セッション用の一時退避フォルダ
+        self._trash_counter = 0    # 退避サブフォルダの連番
 
         # F5 を押さなくても定期的にフォルダを再スキャンし、追加/削除を自動反映する。
         # reload_current_dir は変化がなければ何もしないため、無駄な再描画はない。
@@ -316,6 +324,10 @@ class ImageViewer(QWidget):
             self.reload_current_dir()
         elif event.key() == Qt.Key_S:
             self.cycle_sort_mode()
+        elif event.key() == Qt.Key_Delete:
+            self.delete_current()
+        elif event.key() == Qt.Key_Z and event.modifiers() & Qt.ControlModifier:
+            self.undo_delete()
 
     def move_index(self, delta):
         if not self.images or self.is_loading:
@@ -1035,19 +1047,106 @@ class ImageViewer(QWidget):
             print(f"[reload] {diff} files ({old_count} -> {new_count})")
 
     def delete_current(self):
-        """現在の画像をゴミ箱へ送り、次の画像へ進む (確認なし)。"""
+        """現在の画像をアプリ管理ゴミ箱へ退避し、次の画像へ進む。Ctrl+Z で戻せる。"""
         if not self.images:
             return
         image_path = self.images[self.index]
-        if os.path.exists(image_path):
+        if self._perform_soft_delete([image_path], image_path):
+            self._remove_image_from_list(image_path)
+
+    def _ensure_trash_dir(self):
+        """セッション用のアプリ管理ゴミ箱フォルダを用意して返す。失敗時 None。"""
+        if self._trash_dir and os.path.isdir(self._trash_dir):
+            return self._trash_dir
+        base = os.path.join(tempfile.gettempdir(), f"imageviewer_trash_{os.getpid()}")
+        try:
+            os.makedirs(base, exist_ok=True)
+        except OSError as e:
+            QMessageBox.warning(self, "削除失敗", f"一時フォルダの作成に失敗しました:\n{e}")
+            return None
+        self._trash_dir = base
+        return base
+
+    def _perform_soft_delete(self, file_paths, image_path, seed=None):
+        """file_paths をアプリ管理ゴミ箱へ退避し、undo 用に記録する。成功で True。
+        image_path は表示/一覧から取り除く画像本体のパス。"""
+        trash_dir = self._ensure_trash_dir()
+        if trash_dir is None:
+            return False
+        sub = os.path.join(trash_dir, str(self._trash_counter))
+        try:
+            os.makedirs(sub, exist_ok=True)
+        except OSError as e:
+            QMessageBox.warning(self, "削除失敗", f"一時フォルダの作成に失敗しました:\n{e}")
+            return False
+        moved = []
+        for p in file_paths:
+            np = os.path.normpath(p)
+            if not os.path.exists(np):
+                continue
+            dest = os.path.join(sub, os.path.basename(np))
             try:
-                send2trash(os.path.normpath(image_path))
+                shutil.move(np, dest)
             except Exception as e:
-                QMessageBox.warning(
-                    self, "削除失敗", f"ゴミ箱への移動に失敗しました:\n{e}"
+                # 失敗したら既に退避した分を元へ戻してから中止
+                for d, orig in moved:
+                    try:
+                        shutil.move(d, orig)
+                    except Exception:
+                        pass
+                QMessageBox.warning(self, "削除失敗", f"ゴミ箱への移動に失敗しました:\n{e}")
+                return False
+            moved.append((dest, np))
+        if not moved:
+            return False
+        self._trash_counter += 1
+        self._undo_stack.append({
+            "moved": moved,
+            "image_path": os.path.normpath(image_path),
+            "seed": seed,
+        })
+        return True
+
+    def undo_delete(self):
+        """直近の削除を元に戻す (アプリ管理ゴミ箱から復元)。Ctrl+Z。"""
+        if not self._undo_stack:
+            return
+        entry = self._undo_stack.pop()
+        restored_image = None
+        for trash_path, original_path in entry["moved"]:
+            if os.path.exists(original_path):
+                continue  # 同名ファイルが既にあるなら上書きしない
+            try:
+                os.makedirs(os.path.dirname(original_path), exist_ok=True)
+                shutil.move(trash_path, original_path)
+            except Exception as e:
+                QMessageBox.warning(self, "復元失敗", f"ファイルの復元に失敗しました:\n{e}")
+                continue
+            if original_path == entry["image_path"]:
+                restored_image = original_path
+        # 画像をリストへ戻して表示する
+        if restored_image and restored_image not in self.images:
+            self.images.append(restored_image)
+            self.images = self._sorted_images(self.images)
+            self.index = self.images.index(restored_image)
+            self.progress_bar.set_images(self.images, self.index, self._progress_group_keys())
+            if self.grid_mode:
+                self.grid.set_images(
+                    self.images, self.index, self.grid.columns,
+                    group_keys=self._grid_group_keys(),
                 )
-                return
-        self._remove_image_from_list(image_path)
+                QTimer.singleShot(0, self._scroll_grid_to_current)
+            else:
+                self.load_pixmap()
+                self.display_pixmap()
+
+    def _flush_trash_to_recycle_bin(self):
+        """アプリ管理ゴミ箱に残った(undoされなかった)削除ファイルを実ゴミ箱へ送る。"""
+        if self._trash_dir and os.path.isdir(self._trash_dir):
+            try:
+                send2trash(os.path.normpath(self._trash_dir))
+            except Exception:
+                pass
 
     def _remove_image_from_list(self, image_path):
         """画像をリストから除去し、表示を次の画像へ更新する。"""
@@ -1103,6 +1202,7 @@ class ImageViewer(QWidget):
             self.update_history()
         self.auto_reload_timer.stop()
         self.thumb_loader.stop()
+        self._flush_trash_to_recycle_bin()
         config = {
             "history": self.history,
             "position": self._normal_pos,

@@ -2,6 +2,8 @@ import os
 import re
 import sys
 import json
+import shutil
+import tempfile
 import subprocess
 from datetime import datetime
 from collections import OrderedDict
@@ -61,6 +63,12 @@ class ImageViewer(QWidget):
         self.click_timer = QTimer()
         self.click_timer.setSingleShot(True)
         self.click_timer.timeout.connect(self.reset_click_count)
+
+        # 削除のアンドゥ (アプリ管理ゴミ箱方式)。削除は一時フォルダへ退避し、
+        # Ctrl+Z で元の場所へ確実に戻す。終了時に残りを実ゴミ箱へ送る。
+        self._undo_stack = []      # 削除のアンドゥ履歴 (LIFO)
+        self._trash_dir = None     # セッション用の一時退避フォルダ
+        self._trash_counter = 0    # 退避サブフォルダの連番
 
         # F5 を押さなくても定期的にフォルダを再スキャンし、追加/削除を自動反映する。
         # reload_current_dir は変化がなければ何もしないため、無駄な再描画はない。
@@ -326,6 +334,10 @@ class ImageViewer(QWidget):
             self.reload_current_dir()
         elif event.key() == Qt.Key_S:
             self.cycle_sort_mode()
+        elif event.key() == Qt.Key_Delete:
+            self.delete_and_exclude_current()
+        elif event.key() == Qt.Key_Z and event.modifiers() & Qt.ControlModifier:
+            self.undo_delete()
 
     def move_index(self, delta):
         if not self.images or self.is_loading:
@@ -1176,16 +1188,25 @@ class ImageViewer(QWidget):
         return True
 
     def delete_and_exclude_current(self):
-        """現在の画像と対応 JSON をゴミ箱へ送り、seed を除外リストに追記する。"""
+        """現在の画像と対応 JSON をアプリ管理ゴミ箱へ退避し、seed を除外リストへ
+        追記する。Ctrl+Z で元に戻せる。"""
         if not self.images:
             return
         image_path = self.images[self.index]
         json_path, seed = self._parse_image_meta(image_path)
 
-        # seed を除外リストへ追記 (seed が取れた場合のみ)
+        # seed を除外する場合は先に保存先を確定 (キャンセルなら中止)
+        if seed is not None and not self._ensure_excluded_seed_file():
+            return
+
+        files = [image_path]
+        if os.path.exists(json_path):
+            files.append(json_path)
+        if not self._perform_soft_delete(files, image_path, seed=seed):
+            return
+
+        # 退避に成功してから seed を除外リストへ追記 (undo 時に末尾行を取り消す)
         if seed is not None:
-            if not self._ensure_excluded_seed_file():
-                return  # ファイル未指定でキャンセルされた場合は何もしない
             try:
                 with open(self.excluded_seed_file, "a", encoding="utf-8") as f:
                     f.write(seed + "\n")
@@ -1193,23 +1214,124 @@ class ImageViewer(QWidget):
                 QMessageBox.warning(
                     self, "追記失敗", f"除外seedファイルへの書き込みに失敗しました:\n{e}"
                 )
-                return
-
-        # 画像と JSON をゴミ箱へ送る
-        errors = []
-        for p in (image_path, json_path):
-            if os.path.exists(p):
-                try:
-                    send2trash(os.path.normpath(p))
-                except Exception as e:
-                    errors.append(f"{os.path.basename(p)}: {e}")
-        if errors:
-            QMessageBox.warning(
-                self, "削除失敗", "ゴミ箱への移動に失敗しました:\n" + "\n".join(errors)
-            )
 
         # 一覧/表示から取り除き次の画像へ
         self._remove_image_from_list(image_path)
+
+    def _ensure_trash_dir(self):
+        """セッション用のアプリ管理ゴミ箱フォルダを用意して返す。失敗時 None。"""
+        if self._trash_dir and os.path.isdir(self._trash_dir):
+            return self._trash_dir
+        base = os.path.join(tempfile.gettempdir(), f"imageviewer_trash_{os.getpid()}")
+        try:
+            os.makedirs(base, exist_ok=True)
+        except OSError as e:
+            QMessageBox.warning(self, "削除失敗", f"一時フォルダの作成に失敗しました:\n{e}")
+            return None
+        self._trash_dir = base
+        return base
+
+    def _perform_soft_delete(self, file_paths, image_path, seed=None):
+        """file_paths をアプリ管理ゴミ箱へ退避し、undo 用に記録する。成功で True。
+        image_path は表示/一覧から取り除く画像本体のパス。"""
+        trash_dir = self._ensure_trash_dir()
+        if trash_dir is None:
+            return False
+        sub = os.path.join(trash_dir, str(self._trash_counter))
+        try:
+            os.makedirs(sub, exist_ok=True)
+        except OSError as e:
+            QMessageBox.warning(self, "削除失敗", f"一時フォルダの作成に失敗しました:\n{e}")
+            return False
+        moved = []
+        for p in file_paths:
+            np = os.path.normpath(p)
+            if not os.path.exists(np):
+                continue
+            dest = os.path.join(sub, os.path.basename(np))
+            try:
+                shutil.move(np, dest)
+            except Exception as e:
+                # 失敗したら既に退避した分を元へ戻してから中止
+                for d, orig in moved:
+                    try:
+                        shutil.move(d, orig)
+                    except Exception:
+                        pass
+                QMessageBox.warning(self, "削除失敗", f"ゴミ箱への移動に失敗しました:\n{e}")
+                return False
+            moved.append((dest, np))
+        if not moved:
+            return False
+        self._trash_counter += 1
+        self._undo_stack.append({
+            "moved": moved,
+            "image_path": os.path.normpath(image_path),
+            "seed": seed,
+        })
+        return True
+
+    def undo_delete(self):
+        """直近の削除を元に戻す (アプリ管理ゴミ箱から復元)。Ctrl+Z。"""
+        if not self._undo_stack:
+            return
+        entry = self._undo_stack.pop()
+        restored_image = None
+        for trash_path, original_path in entry["moved"]:
+            if os.path.exists(original_path):
+                continue  # 同名ファイルが既にあるなら上書きしない
+            try:
+                os.makedirs(os.path.dirname(original_path), exist_ok=True)
+                shutil.move(trash_path, original_path)
+            except Exception as e:
+                QMessageBox.warning(self, "復元失敗", f"ファイルの復元に失敗しました:\n{e}")
+                continue
+            if original_path == entry["image_path"]:
+                restored_image = original_path
+        # 除外 seed の取り消し: 末尾(非空)行がその seed なら削除
+        seed = entry.get("seed")
+        if seed is not None:
+            self._remove_last_seed_line(seed)
+        # 画像をリストへ戻して表示する
+        if restored_image and restored_image not in self.images:
+            self.images.append(restored_image)
+            self.images = self._sorted_images(self.images)
+            self.index = self.images.index(restored_image)
+            self.progress_bar.set_images(self.images, self.index, self._progress_group_keys())
+            if self.grid_mode:
+                self.grid.set_images(
+                    self.images, self.index, self.grid.columns,
+                    group_keys=self._grid_group_keys(),
+                )
+                QTimer.singleShot(0, self._scroll_grid_to_current)
+            else:
+                self.load_pixmap()
+                self.display_pixmap()
+
+    def _remove_last_seed_line(self, seed):
+        """除外 seed ファイルの末尾(非空)行がその seed なら取り除く (undo 用)。"""
+        path = self.excluded_seed_file
+        if not path or not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            while lines and lines[-1] == "":
+                lines.pop()
+            if lines and lines[-1] == seed:
+                lines.pop()
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(lines) + ("\n" if lines else ""))
+        except OSError:
+            pass
+
+    def _flush_trash_to_recycle_bin(self):
+        """アプリ管理ゴミ箱に残った(undoされなかった)削除ファイルを実ゴミ箱へ送る。"""
+        if self._trash_dir and os.path.isdir(self._trash_dir):
+            try:
+                send2trash(os.path.normpath(self._trash_dir))
+            except Exception:
+                pass
 
     def _remove_image_from_list(self, image_path):
         """画像をリストから除去し、表示を次の画像へ更新する。"""
@@ -1254,6 +1376,7 @@ class ImageViewer(QWidget):
             self.update_history()
         self.auto_reload_timer.stop()
         self.thumb_loader.stop()
+        self._flush_trash_to_recycle_bin()
         config = {
             "history": self.history,
             "position": self._normal_pos,
