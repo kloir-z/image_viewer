@@ -105,7 +105,7 @@ Double-clicking the image will then open it directly in this viewer.
 ### Display
 
 - **F**: enter full screen
-- **Escape**: exit full screen
+- **Escape**: exit full screen; otherwise toggle between single-image and thumbnail grid view
 - **Ctrl + mouse wheel**: zoom in/out centered at the cursor position
 - **Left-button drag**: pan when zoomed in
 - **Triple click**: toggle original (1:1) size
@@ -116,14 +116,17 @@ Double-clicking the image will then open it directly in this viewer.
 
 - **Drag & drop**: drop a file (opens its directory) or a directory onto the window
 - **Subfolder loading**: when the dropped directory contains subfolders, you can choose to include images from 1, 2, 3, or all sub-levels (or skip subfolders entirely)
-- **F5 / Reload**: re-scan the current directory tree to pick up newly added or removed files. The currently displayed image stays in place when possible.
+- **F5 / Reload**: re-scan the current directory tree to pick up newly added or removed files. The currently displayed image stays in place when possible. The same re-scan also runs automatically every 5 seconds.
 
 ### Context menu (right-click)
 
 - **History**: re-open one of the last 20 directories. Each entry restores both the previously viewed image and the subfolder depth that was used.
 - **再読み込み (F5)**: same as F5
 - **ファイル名の記録**: append the current image's relative path to a per-session pickup file (`imageviewer_pickup_YYYYMMDD_HHMMSS.txt` in the root directory). Useful for marking files for later batch processing.
-- **Open current dir in explorer**: open the current image's containing folder in the system file explorer
+- **一覧表示 / 1枚表示に戻る**: toggle the thumbnail grid view (also on Escape); single-click selects, double-click or Enter opens, Ctrl+wheel changes the column count
+- **並べ替え**: sort by folder, filename, or seed (also cycled with the S key)
+- **画像とJSONを削除しseedを除外 (Del)**: move the current image (and its sidecar JSON) to an app-managed trash and record the seed — no confirmation dialog; **削除を元に戻す (Ctrl+Z)** restores it. Anything not restored goes to the Windows Recycle Bin when the app closes
+- **エクスプローラーで開く**: open the current image's containing folder in the system file explorer
 
 ## Supported Formats
 
@@ -137,8 +140,10 @@ Double-clicking the image will then open it directly in this viewer.
 
 ## Configuration
 
-`config.json` is created in the working directory on close and stores:
+`config.json` is created next to the script on close and stores:
 
 - `history`: per-directory entries with the subfolder depth and the last-viewed image path
-- `position`, `size`: window geometry
+- `position`, `size`, `maximized`: window geometry
+- `grid_columns`: column count of the thumbnail grid view
 - `suppress_missing_file_warning`: whether the "file not found" dialog has been silenced
+- `excluded_seed_file`: where recorded seeds are appended on delete

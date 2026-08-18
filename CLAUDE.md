@@ -44,11 +44,11 @@ The classes:
   - Full screen toggle (F key). Escape priority: close JSON overlay → leave grid view → exit fullscreen → (in windowed single view) enter grid view. So in single view Escape opens the grid, and in grid view Escape returns to single — Escape toggles the two
   - Ctrl+wheel zoom centered at cursor, drag to pan, double-click to reset, triple-click to toggle 1:1 original size
   - F5 reload: re-scan the current directory tree, preserving the displayed image when possible. Also runs **automatically every 5 seconds** via `auto_reload_timer` (a `QTimer` started in `__init__`, stopped in `closeEvent`). The tick (`_auto_reload_tick`) skips while `is_loading` or while a modal dialog / popup menu is open (`QApplication.activeModalWidget()` / `activePopupWidget()`). `reload_current_dir` no-ops when the freshly-scanned, sorted list equals the current `self.images`, so an idle poll causes no repaint/flicker
-  - Context menu (right-click) with directory history, grid/single-view toggle, reload, a "並べ替え" submenu (フォルダ順 / ファイル名順 / seed順, checkable, calls `set_sort_mode`), pickup-file recording, JSON overlay display, image+JSON deletion with seed exclusion, and "open in explorer"
+  - Context menu (right-click), fully in Japanese: directory history (「開く」/「履歴から削除」 per entry), grid/single-view toggle, reload, a "並べ替え" submenu (フォルダ順 / ファイル名順 / seed順, checkable, calls `set_sort_mode`), pickup-file recording, JSON overlay display, 「画像とJSONを削除しseedを除外 (Del)」, 「削除を元に戻す (Ctrl+Z)」 (disabled while the undo stack is empty; when the image list is empty but the undo stack is not, the menu still offers it so the last deletion can be undone), and 「エクスプローラーで開く」
   - Grid (thumbnail) view: toggled from the context menu ("一覧表示" / "1枚表示に戻る") or Escape; click a thumbnail to open it in single view, Escape to return
   - JSON sidecar handling (`_parse_image_meta`): maps an image to its companion JSON and seed by the filename's `_seed` token. `0001_seed405730226.png` → JSON `0001.json` (the part before `_seed`) and seed `405730226` (the digits after `_seed`). With no `_seed` token, the JSON is the image basename with a `.json` extension and the seed is `None`.
     - **"JSONを表示"** (`show_json_overlay`): reads the companion JSON, pretty-prints it (falls back to raw text on parse failure), and shows it in a `JsonOverlay`
-    - **"画像とJSONを削除しseedを除外"** (`delete_and_exclude_current`): appends the seed (one per line) to the excluded-seed file, sends the image and its JSON to the Recycle Bin (`send2trash`), then advances to the next image via `_remove_image_from_list`. No confirmation dialog. If the seed file is unset, a save-file dialog prompts for it once and persists the choice.
+    - **"画像とJSONを削除しseedを除外 (Del)"** (`delete_and_exclude_current`, also bound to the Del key): appends the seed (one per line) to the excluded-seed file, moves the image and its JSON to an app-managed trash folder (`%TEMP%\imageviewer_trash_<pid>`), then advances to the next image via `_remove_image_from_list`. No confirmation dialog — instead **Ctrl+Z** (`undo_delete`) restores the files to their original location and removes the seed's just-appended line. Whatever is not undone is sent to the real Recycle Bin by `closeEvent` (`_flush_trash_to_recycle_bin`). If the app crashes, the leftover trash folder is collected into the Recycle Bin on the next launch (`_cleanup_stale_trash`); a `.lock` file held open inside the folder makes the GC's `os.rename` probe fail for folders still in use by a running instance. If the seed file is unset, a save-file dialog prompts for it once and persists the choice.
     - The excluded-seed file path is chosen via `change_excluded_seed_file` (a save dialog with overwrite-confirmation disabled, since the file is appended to) and persisted as `excluded_seed_file` in `config.json`
   - Saves window position, size, history, warning-suppression flag, grid column count, and excluded-seed file path to `config.json` on close
 
@@ -101,7 +101,7 @@ The classes:
 
 ## Configuration
 
-`config.json` (created in the working directory on close):
+`config.json` (created next to `image_viewer.py` — the script directory, independent of the launch-time working directory — on close):
 
 - `history`: `OrderedDict` of `root_path → { root_path, depth, last_image_path }`
   - `depth`: `0` = no subfolders, `1`/`2`/`3` = N levels, `-1` = all levels
