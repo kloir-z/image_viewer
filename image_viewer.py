@@ -49,7 +49,10 @@ class ImageViewer(QWidget):
         self.pan_offset = QPoint(0, 0)
         self.is_panning = False
         self.pan_start_pos = QPoint(0, 0)
-        self.config_path = "config.json"
+        # 起動時のカレントディレクトリに依存しないよう、スクリプトと同じ場所に置く
+        self.config_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "config.json"
+        )
         self.supported_extensions = [
             ".png", ".apng",
             ".jpg", ".jpeg", ".jfif", ".jpe", ".mpo",
@@ -69,6 +72,9 @@ class ImageViewer(QWidget):
         self._undo_stack = []      # 削除のアンドゥ履歴 (LIFO)
         self._trash_dir = None     # セッション用の一時退避フォルダ
         self._trash_counter = 0    # 退避サブフォルダの連番
+        self._trash_lock = None    # 使用中判定用に開いたままにするロックファイル
+        # 前回クラッシュ等で %TEMP% に取り残された退避ファイルを実ゴミ箱へ送る
+        self._cleanup_stale_trash()
 
         # F5 を押さなくても定期的にフォルダを再スキャンし、追加/削除を自動反映する。
         # reload_current_dir は変化がなければ何もしないため、無駄な再描画はない。
@@ -382,7 +388,7 @@ class ImageViewer(QWidget):
                 self.progress_bar.set_index(self.index)
                 self.setWindowTitle(f"{folder_name} - {os.path.basename(image_path)} - {formatted_time} - {self.index + 1}/{total}")
             else:
-                self.setWindowTitle("No images loaded")
+                self.setWindowTitle("画像が読み込まれていません")
 
             try:
                 exif = image._getexif()
@@ -423,7 +429,7 @@ class ImageViewer(QWidget):
 
         if not self.images:
             self.label.clear()
-            self.setWindowTitle("No images loaded")
+            self.setWindowTitle("画像が読み込まれていません")
             self.progress_bar.clear()
             self.is_loading = False
             return
@@ -719,8 +725,7 @@ class ImageViewer(QWidget):
         フォルダ順: (dirname, basename) の自然順 (構築順と等価)。
         ファイル名順: (basename, dirname) の自然順 — 同名ファイルはフォルダ名順で並ぶ。
         seed順: (seed数値, dirname, basename) — seed の無いものは末尾。"""
-        def natural_sort_key(s):
-            return [int(text) if text.isdigit() else text for text in re.split(r"(\d+)", s)]
+        natural_sort_key = self._natural_sort_key
 
         if self.sort_mode == "filename":
             key = lambda p: (
@@ -882,11 +887,11 @@ class ImageViewer(QWidget):
             self.display_pixmap()
             if self.grid_mode:
                 self.grid.set_images(
-                self.images,
-                self.index,
-                self.grid.columns,
-                group_keys=self._grid_group_keys(),
-            )
+                    self.images,
+                    self.index,
+                    self.grid.columns,
+                    group_keys=self._grid_group_keys(),
+                )
                 QTimer.singleShot(0, self._scroll_grid_to_current)
 
     def load_from_history(self, root_path, history_entry):
@@ -918,13 +923,13 @@ class ImageViewer(QWidget):
                 history_entry = self.history[dir_path]
                 dir_menu = context_menu.addMenu(dir_path)
 
-                open_action = QAction("Open", self)
+                open_action = QAction("開く", self)
                 open_action.triggered.connect(
                     lambda _, d=dir_path, entry=history_entry: self.load_from_history(d, entry)
                 )
                 dir_menu.addAction(open_action)
 
-                delete_action = QAction("Delete from history", self)
+                delete_action = QAction("履歴から削除", self)
                 delete_action.triggered.connect(lambda _, d=dir_path: self.delete_from_history(d))
                 dir_menu.addAction(delete_action)
 
@@ -958,9 +963,14 @@ class ImageViewer(QWidget):
             json_action.triggered.connect(self.show_json_overlay)
             context_menu.addAction(json_action)
 
-            delete_action = QAction("画像とJSONを削除しseedを除外", self)
+            delete_action = QAction("画像とJSONを削除しseedを除外 (Del)", self)
             delete_action.triggered.connect(self.delete_and_exclude_current)
             context_menu.addAction(delete_action)
+
+            undo_action = QAction("削除を元に戻す (Ctrl+Z)", self)
+            undo_action.setEnabled(bool(self._undo_stack))
+            undo_action.triggered.connect(self.undo_delete)
+            context_menu.addAction(undo_action)
 
             seed_file_label = (
                 f"除外seedファイルを変更... ({os.path.basename(self.excluded_seed_file)})"
@@ -973,20 +983,26 @@ class ImageViewer(QWidget):
 
             context_menu.addSeparator()
 
-            open_in_explorer_action = QAction("###Open current dir in explorer###", self)
+            open_in_explorer_action = QAction("エクスプローラーで開く", self)
             open_in_explorer_action.triggered.connect(lambda: self.open_in_explorer(current_dir))
             context_menu.addAction(open_in_explorer_action)
+        elif self._undo_stack:
+            # 最後の1枚を削除した直後でも Ctrl+Z 相当の操作をメニューから行える
+            undo_action = QAction("削除を元に戻す (Ctrl+Z)", self)
+            undo_action.triggered.connect(self.undo_delete)
+            context_menu.addAction(undo_action)
         context_menu.exec_(self.mapToGlobal(position))
 
     def delete_from_history(self, dir_path):
-        reply = QMessageBox.warning(
-            self,
-            "History deletion",
-            f"Are you sure you want to delete {dir_path} from history?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply == QMessageBox.Yes:
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Warning)
+        msg_box.setWindowTitle("履歴の削除")
+        msg_box.setText(f"{dir_path} を履歴から削除しますか？")
+        delete_btn = msg_box.addButton("削除", QMessageBox.YesRole)
+        cancel_btn = msg_box.addButton("キャンセル", QMessageBox.NoRole)
+        msg_box.setDefaultButton(cancel_btn)
+        msg_box.exec_()
+        if msg_box.clickedButton() is delete_btn:
             if dir_path in self.history:
                 del self.history[dir_path]
 
@@ -1034,13 +1050,11 @@ class ImageViewer(QWidget):
         if new_images == self.images:
             return
 
-        old_count = len(self.images)
         self.images = new_images
-        new_count = len(self.images)
 
         if not self.images:
             self.label.clear()
-            self.setWindowTitle("No images loaded")
+            self.setWindowTitle("画像が読み込まれていません")
             self.progress_bar.clear()
             return
 
@@ -1066,12 +1080,6 @@ class ImageViewer(QWidget):
                 self.grid.columns,
                 group_keys=self._grid_group_keys(),
             )
-
-        diff = new_count - old_count
-        if diff > 0:
-            print(f"[reload] +{diff} files ({old_count} -> {new_count})")
-        elif diff < 0:
-            print(f"[reload] {diff} files ({old_count} -> {new_count})")
 
     def pickup_current_image(self):
         if not self.images or self.current_root_path is None:
@@ -1229,7 +1237,39 @@ class ImageViewer(QWidget):
             QMessageBox.warning(self, "削除失敗", f"一時フォルダの作成に失敗しました:\n{e}")
             return None
         self._trash_dir = base
+        # ロックファイルを開いたままにしておく。開いているファイルを含む
+        # ディレクトリは Windows では rename できないため、_cleanup_stale_trash
+        # の rename 試行が「他インスタンス使用中」の判定として機能する。
+        try:
+            self._trash_lock = open(os.path.join(base, ".lock"), "w")
+        except OSError:
+            self._trash_lock = None
         return base
+
+    def _cleanup_stale_trash(self):
+        """過去セッションがクラッシュ等で残したアプリ管理ゴミ箱を実ゴミ箱へ送る。
+        まず rename を試み、稼働中の別インスタンスが .lock を開いていれば
+        失敗するのでそのままスキップする。"""
+        tmp = tempfile.gettempdir()
+        try:
+            entries = os.listdir(tmp)
+        except OSError:
+            return
+        for name in entries:
+            if not name.startswith("imageviewer_trash_"):
+                continue
+            path = os.path.join(tmp, name)
+            if not os.path.isdir(path):
+                continue
+            gc_path = path + "_gc"
+            try:
+                os.rename(path, gc_path)
+            except OSError:
+                continue  # 使用中 (または権限なし) は次回に持ち越し
+            try:
+                send2trash(os.path.normpath(gc_path))
+            except Exception:
+                pass
 
     def _perform_soft_delete(self, file_paths, image_path, seed=None):
         """file_paths をアプリ管理ゴミ箱へ退避し、undo 用に記録する。成功で True。
@@ -1327,6 +1367,12 @@ class ImageViewer(QWidget):
 
     def _flush_trash_to_recycle_bin(self):
         """アプリ管理ゴミ箱に残った(undoされなかった)削除ファイルを実ゴミ箱へ送る。"""
+        if self._trash_lock is not None:
+            try:
+                self._trash_lock.close()
+            except Exception:
+                pass
+            self._trash_lock = None
         if self._trash_dir and os.path.isdir(self._trash_dir):
             try:
                 send2trash(os.path.normpath(self._trash_dir))
@@ -1340,7 +1386,7 @@ class ImageViewer(QWidget):
 
         if not self.images:
             self.label.clear()
-            self.setWindowTitle("No images loaded")
+            self.setWindowTitle("画像が読み込まれていません")
             self.progress_bar.clear()
             if self.grid_mode:
                 self.grid.set_images(
